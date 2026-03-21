@@ -1,15 +1,22 @@
 """TD(λ) training loop for self-play.
 
 Implements the core training algorithm:
-1. Play a game via self-play, collecting states
-2. Compute TD(λ) targets from the final outcome
-3. Update network weights via backpropagation
+1. Play a game via self-play on CPU (fast for small networks)
+2. Move network to GPU, compute TD(λ) updates via backprop
+3. Move network back to CPU for next game
 
 The training loop also handles:
 - ε-greedy exploration with linear decay
 - Periodic evaluation against frozen checkpoints
 - SPRT-based level promotion
 - Plateau detection and training termination
+
+Device strategy:
+- Self-play and evaluation run on CPU (avoids CUDA kernel launch overhead
+  which dominates for small networks with per-move forward passes)
+- TD(λ) backpropagation runs on GPU when available (benefits from
+  parallelism in the backward pass across the game's state sequence)
+- Frozen opponent checkpoints always stay on CPU
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ from engine.state import BoardState, encode_board, BOARD_FEATURE_SIZE
 from engine.network import TDNetwork, NUM_OUTPUTS, compute_equity
 from engine.game import play_game, GameRecord, GameResult
 from engine.setup_generator import SetupGenerator
+from utils.sprt import SPRTResult, sprt_test
 
 
 @dataclass
@@ -81,6 +89,8 @@ def td_lambda_update(
 ) -> float:
     """Perform TD(λ) weight update from a completed game.
 
+    The network is expected to already be on `device` (GPU) when called.
+
     Uses the sequence of states from the game record and the final
     outcome to compute TD(λ) targets, then updates the network.
 
@@ -90,11 +100,11 @@ def td_lambda_update(
       using the λ parameter (eligibility traces)
 
     Args:
-        network: the network to update.
+        network: the network to update (should be on `device`).
         optimizer: the optimizer.
         record: completed game record.
         td_lambda: the λ parameter (0 = TD(0), 1 = Monte Carlo).
-        device: torch device.
+        device: torch device for training (typically GPU).
 
     Returns:
         Mean loss value for monitoring.
@@ -109,7 +119,7 @@ def td_lambda_update(
         result_to_target(record.result)
     ).to(device)
 
-    # Convert all states to tensors
+    # Convert all states to tensors on the training device
     state_tensors = [
         torch.from_numpy(s).to(device) for s in record.states
     ]
@@ -158,13 +168,14 @@ def evaluate_against(
 ) -> float:
     """Evaluate a network against an opponent.
 
+    Both networks should be on `device` (CPU for evaluation).
     Plays num_games games, alternating who goes first, and returns
     the win rate of the primary network.
 
     Args:
         network: the network to evaluate.
         opponent: the opponent network.
-        device: torch device.
+        device: torch device (CPU for evaluation).
         num_games: number of games to play.
         setup_generator: optional setup generator for starting positions.
         rng: random number generator.
@@ -212,18 +223,21 @@ def evaluate_against(
     return wins / num_games
 
 
-from utils.sprt import SPRTResult, sprt_test
-
-
 class Trainer:
     """Main training orchestrator.
 
     Manages the self-play training loop, evaluation, SPRT promotion,
     and plateau detection.
 
+    Device strategy:
+    - play_device (CPU): used for self-play and evaluation games
+    - train_device (GPU if available): used for TD(λ) backprop
+    - Network moves between devices as needed
+    - Frozen opponents always stay on play_device
+
     Args:
         config: training configuration dictionary.
-        device: torch device (CPU or CUDA).
+        device: torch device for training (GPU if available).
         output_dir: directory for saving checkpoints and logs.
     """
 
@@ -234,24 +248,35 @@ class Trainer:
         output_dir: Path,
     ) -> None:
         self.config = config
-        self.device = device
+        self.train_device = device
+        self.play_device = torch.device("cpu")
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Network
+        # Network — starts on CPU for initial self-play
         net_config = config.get("network", {})
         self.network = TDNetwork(
             input_size=BOARD_FEATURE_SIZE,
             hidden_layers=net_config.get("hidden_layers", [256, 256]),
             dropout=net_config.get("dropout", 0.0),
-        ).to(device)
+        ).to(self.play_device)
 
         # Optimizer
         train_config = config.get("training", {})
+        self.lr = train_config.get("learning_rate", 0.0001)
         self.optimizer = torch.optim.Adam(
             self.network.parameters(),
-            lr=train_config.get("learning_rate", 0.0001),
+            lr=self.lr,
         )
+
+        # For small networks, CPU is faster than GPU due to transfer overhead.
+        # The per-game CPU↔GPU round trip costs more than the backprop saves.
+        # Stay on CPU unless the network is large enough to benefit from GPU.
+        param_count = sum(p.numel() for p in self.network.parameters())
+        if self.train_device.type == "cuda" and param_count < 1_000_000:
+            print(f"Network has {param_count:,} parameters — using CPU for all computation")
+            print(f"(GPU will be used when network exceeds 1M parameters)")
+            self.train_device = self.play_device
 
         # TD parameters
         self.td_lambda = train_config.get("td_lambda", 0.7)
@@ -294,10 +319,18 @@ class Trainer:
         )
 
         # Level tracking
-        self.level_opponents: list[TDNetwork] = []  # frozen checkpoints
+        self.level_opponents: list[TDNetwork] = []  # frozen checkpoints, always on CPU
         self.stats = TrainingStats()
         self.rng = np.random.default_rng(config.get("seed"))
         self._failed_sprts_this_level = 0
+
+    def _to_play(self) -> None:
+        """Move network to CPU for self-play/evaluation."""
+        self.network.to(self.play_device)
+
+    def _to_train(self) -> None:
+        """Move network to GPU for backpropagation."""
+        self.network.to(self.train_device)
 
     def _current_epsilon(self) -> float:
         """Compute current ε for ε-greedy exploration."""
@@ -334,22 +367,26 @@ class Trainer:
         return improvement < self.staleness_min_improvement
 
     def _freeze_checkpoint(self) -> TDNetwork:
-        """Create a frozen copy of the current network."""
+        """Create a frozen copy of the current network on CPU."""
         checkpoint = TDNetwork(
             input_size=BOARD_FEATURE_SIZE,
             hidden_layers=self.config.get("network", {}).get(
                 "hidden_layers", [256, 256]
             ),
-        ).to(self.device)
-        checkpoint.load_state_dict(self.network.state_dict())
+        ).to(self.play_device)
+        # Copy weights (handle case where network might be on GPU)
+        state_dict = {k: v.cpu() for k, v in self.network.state_dict().items()}
+        checkpoint.load_state_dict(state_dict)
         checkpoint.eval()
         return checkpoint
 
     def _save_checkpoint(self, label: str) -> Path:
         """Save the current network to disk."""
         path = self.output_dir / f"checkpoint_{label}.pt"
+        # Always save CPU state dict for portability
+        state_dict = {k: v.cpu() for k, v in self.network.state_dict().items()}
         torch.save({
-            "model_state_dict": self.network.state_dict(),
+            "model_state_dict": state_dict,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "stats": {
                 "games_played": self.stats.games_played,
@@ -362,7 +399,8 @@ class Trainer:
     def _run_sprt(self) -> bool:
         """Run the SPRT promotion test against the current level opponent.
 
-        Returns True if the test accepts (promote).
+        Network must be on CPU before calling. Returns True if the test
+        accepts (promote).
         """
         if not self.level_opponents:
             # No opponent yet — auto-promote to level 1
@@ -379,7 +417,7 @@ class Trainer:
             start = self.setup_generator.generate()
             if games % 2 == 0:
                 record = play_game(
-                    self.network, self.device,
+                    self.network, self.play_device,
                     starting_state=start,
                     opponent=opponent,
                     epsilon=0.0, rng=self.rng,
@@ -388,7 +426,7 @@ class Trainer:
                     wins += 1
             else:
                 record = play_game(
-                    opponent, self.device,
+                    opponent, self.play_device,
                     starting_state=start,
                     opponent=self.network,
                     epsilon=0.0, rng=self.rng,
@@ -419,6 +457,11 @@ class Trainer:
     def train(self, max_games: Optional[int] = None) -> TrainingStats:
         """Run the main training loop.
 
+        Each iteration:
+        1. Self-play one game on CPU
+        2. Move network to GPU, run TD(λ) backprop
+        3. Move network back to CPU
+
         Args:
             max_games: maximum total games to play (None = train until plateau).
 
@@ -426,7 +469,9 @@ class Trainer:
             Final training statistics.
         """
         self.stats.training_start_time = time.time()
-        print(f"Starting training on {self.device}")
+
+        using_gpu = self.train_device.type == "cuda"
+        print(f"Training: self-play on CPU, backprop on {self.train_device}")
         print(f"Network: {sum(p.numel() for p in self.network.parameters())} parameters")
 
         while True:
@@ -444,33 +489,36 @@ class Trainer:
                 print(f"Plateau: staleness detected at level {self.stats.current_level}")
                 break
 
-            # Play one training game
+            # 1. Self-play on CPU
+            self._to_play()
             epsilon = self._current_epsilon()
             start = self.setup_generator.generate()
 
-            self.network.train()
+            self.network.eval()
             record = play_game(
-                self.network, self.device,
+                self.network, self.play_device,
                 starting_state=start,
                 epsilon=epsilon, rng=self.rng,
             )
 
-            # TD(λ) update
+            # 2. TD(λ) update on train device (GPU if available)
+            self._to_train()
             loss = td_lambda_update(
                 self.network, self.optimizer, record,
-                self.td_lambda, self.device,
+                self.td_lambda, self.train_device,
             )
 
             self.stats.games_played += 1
             self.stats.games_since_level_up += 1
             self.stats.total_moves += record.num_moves
 
-            # Periodic evaluation
+            # 3. Periodic evaluation (on CPU)
             if self.stats.games_played % self.eval_cadence == 0:
+                self._to_play()
                 self._periodic_eval()
 
             # Progress reporting
-            if self.stats.games_played % 10000 == 0:
+            if self.stats.games_played % 1000 == 0:
                 elapsed = time.time() - self.stats.training_start_time
                 rate = self.stats.games_played / elapsed
                 print(
@@ -478,7 +526,7 @@ class Trainer:
                     f"Level: {self.stats.current_level} | "
                     f"ε: {epsilon:.3f} | "
                     f"Win rate: {self.stats.rolling_win_rate:.3f} | "
-                    f"Rate: {rate:.0f} games/s"
+                    f"Rate: {rate:.1f} games/s"
                 )
 
         # Final save
@@ -490,6 +538,7 @@ class Trainer:
         print(f"  Games: {self.stats.games_played:,}")
         print(f"  Levels reached: {self.stats.levels_reached}")
         print(f"  Time: {elapsed / 3600:.1f} hours")
+        print(f"  Rate: {self.stats.games_played / elapsed:.1f} games/s")
         print(f"  SPRT tests: {self.stats.sprt_tests_run} "
               f"({self.stats.sprt_tests_passed} passed, "
               f"{self.stats.sprt_tests_failed} failed)")
@@ -497,7 +546,10 @@ class Trainer:
         return self.stats
 
     def _periodic_eval(self) -> None:
-        """Run periodic evaluation and check for promotion."""
+        """Run periodic evaluation and check for promotion.
+
+        Network must be on CPU before calling.
+        """
         if not self.level_opponents:
             # No opponent yet — evaluate against random play baseline
             # and auto-promote if reasonable
@@ -513,7 +565,7 @@ class Trainer:
         # Evaluate against current level opponent
         opponent = self.level_opponents[-1]
         win_rate = evaluate_against(
-            self.network, opponent, self.device,
+            self.network, opponent, self.play_device,
             self.eval_match_size, self.setup_generator, self.rng,
         )
         self.stats.rolling_win_rate = win_rate
@@ -539,7 +591,7 @@ class Trainer:
 
     def _promote(self) -> None:
         """Promote to the next level."""
-        # Freeze current network as the level opponent
+        # Freeze current network as the level opponent (always on CPU)
         checkpoint = self._freeze_checkpoint()
         self.level_opponents.append(checkpoint)
 
@@ -553,12 +605,15 @@ class Trainer:
         print(f"  Saved level {self.stats.current_level} checkpoint")
 
     def _eval_vs_random(self) -> float:
-        """Evaluate network against random play (level 0 baseline)."""
+        """Evaluate network against random play (level 0 baseline).
+
+        Network must be on CPU before calling.
+        """
         # Create a freshly initialized network as "random" opponent
-        random_net = TDNetwork(input_size=BOARD_FEATURE_SIZE).to(self.device)
+        random_net = TDNetwork(input_size=BOARD_FEATURE_SIZE).to(self.play_device)
         random_net.eval()
 
         return evaluate_against(
-            self.network, random_net, self.device,
+            self.network, random_net, self.play_device,
             self.eval_match_size, self.setup_generator, self.rng,
         )

@@ -86,6 +86,7 @@ def select_play(
 
     Uses ε-greedy: with probability ε, select a random play;
     otherwise, select the play with the highest equity.
+    Evaluates all candidate positions in a single batched forward pass.
 
     Args:
         state: current board state.
@@ -112,20 +113,25 @@ def select_play(
         result_state = _apply_play(state, plays[idx])
         return plays[idx], result_state
 
-    # Evaluate all plays
-    best_play = plays[0]
-    best_state = _apply_play(state, plays[0])
-    best_equity = _evaluate_position(best_state, network, device)
+    # Apply all plays and collect resulting states
+    result_states = [_apply_play(state, play) for play in plays]
 
-    for play in plays[1:]:
-        result_state = _apply_play(state, play)
-        equity = _evaluate_position(result_state, network, device)
-        if equity > best_equity:
-            best_equity = equity
-            best_play = play
-            best_state = result_state
+    # Encode all resulting positions (flipped, since opponent moves next)
+    features_list = []
+    for rs in result_states:
+        flipped = flip_perspective(rs)
+        features_list.append(encode_board(flipped))
 
-    return best_play, best_state
+    # Batch evaluate in a single forward pass
+    batch = torch.from_numpy(np.stack(features_list)).to(device)
+    with torch.no_grad():
+        outputs = network(batch)
+    # Equity from opponent's perspective; negate for current player
+    equities = -compute_equity(outputs)
+
+    # Pick the best
+    best_idx = equities.argmax().item()
+    return plays[best_idx], result_states[best_idx]
 
 
 def _evaluate_position(
