@@ -99,31 +99,33 @@ class TDNetwork(nn.Module):
             return self.forward(features).squeeze(0)
 
 
-def compute_equity(output: torch.Tensor) -> torch.Tensor:
+def compute_equity(
+    output: torch.Tensor,
+    weights: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Compute equity (expected value) from network output.
 
-    Equity = P(win) + P(win_gammon) + P(win_bg) - P(lose) - P(lose_gammon) - P(lose_bg)
-
-    For money play, gammons are worth 2x and backgammons 3x:
-    Equity = P(win)*(1) + P(win_gammon)*(2) + P(win_bg)*(3)
-           - P(lose)*(1) - P(lose_gammon)*(2) - P(lose_bg)*(3)
-
-    Note: the output probabilities represent the probability of each
-    outcome, not cumulative. So P(win) is the probability of a plain
-    win (not gammon, not backgammon).
+    The weights determine how each outcome contributes to equity.
+    Common configurations:
+        Money play:      [1, 2, 3, -1, -2, -3]
+        DMP (1a1a):      [1, 1, 1, -1, -1, -1]
+        Leader 1a2aC:    [1, 1, 1, -1, -2, -3]
+        Trailer 2a1aC:   [1, 2, 3, -1, -1, -1]
 
     Args:
         output: network output tensor of shape (..., 6).
+        weights: equity weights tensor of shape (6,).
+                 Defaults to money play weights.
 
     Returns:
         Equity tensor of shape (...,).
     """
-    # Money play equity with gammon/backgammon values
-    weights = torch.tensor(
-        [1.0, 2.0, 3.0, -1.0, -2.0, -3.0],
-        device=output.device,
-        dtype=output.dtype,
-    )
+    if weights is None:
+        weights = torch.tensor(
+            [1.0, 2.0, 3.0, -1.0, -2.0, -3.0],
+            device=output.device,
+            dtype=output.dtype,
+        )
     return (output * weights).sum(dim=-1)
 
 

@@ -41,7 +41,7 @@
     <Compile Include="tests\run_tests.py" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="configs\default.yaml" />
+    <Content Include="configs\**\*.yaml" />
     <Content Include="pyproject.toml" />
     <Content Include="requirements.txt" />
     <Content Include="setup_env.bat" />

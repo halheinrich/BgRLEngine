@@ -84,6 +84,7 @@ def select_play(
     device: torch.device,
     epsilon: float = 0.0,
     rng: Optional[np.random.Generator] = None,
+    equity_weights: Optional[torch.Tensor] = None,
 ) -> tuple[Play, BoardState]:
     """Select the best play using the neural network.
 
@@ -98,6 +99,7 @@ def select_play(
         device: torch device.
         epsilon: exploration rate.
         rng: random number generator.
+        equity_weights: optional equity weights tensor (default: money play).
 
     Returns:
         Tuple of (selected Play, resulting BoardState).
@@ -130,7 +132,7 @@ def select_play(
     with torch.no_grad():
         outputs = network(batch)
     # Equity from opponent's perspective; negate for current player
-    equities = -compute_equity(outputs)
+    equities = -compute_equity(outputs, equity_weights)
 
     # Pick the best
     best_idx = equities.argmax().item()
@@ -175,6 +177,7 @@ def play_game(
     epsilon: float = 0.0,
     rng: Optional[np.random.Generator] = None,
     max_moves: int = 1000,
+    equity_weights: Optional[torch.Tensor] = None,
 ) -> GameRecord:
     """Play a complete game via self-play or against an opponent.
 
@@ -182,8 +185,7 @@ def play_game(
     If opponent is provided, the initial player uses `network` and
     the second player uses `opponent`.
 
-    States are recorded from the perspective of the player on roll
-    at each step.
+    All states are recorded from the initial player's perspective.
 
     Args:
         network: the evaluation network (plays as initial player).
@@ -193,6 +195,7 @@ def play_game(
         epsilon: exploration rate for ε-greedy.
         rng: random number generator.
         max_moves: safety limit on game length.
+        equity_weights: optional equity weights for move selection.
 
     Returns:
         GameRecord with state sequence and final result.
@@ -231,7 +234,7 @@ def play_game(
 
         # Select and apply a play
         play, new_state = select_play(
-            state, plays, active_net, device, epsilon, rng
+            state, plays, active_net, device, epsilon, rng, equity_weights
         )
         record.num_moves += 1
 

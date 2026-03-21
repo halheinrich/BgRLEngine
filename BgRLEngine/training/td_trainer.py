@@ -149,6 +149,7 @@ def evaluate_against(
     num_games: int,
     setup_generator: Optional[SetupGenerator] = None,
     rng: Optional[np.random.Generator] = None,
+    equity_weights: Optional[torch.Tensor] = None,
 ) -> float:
     """Evaluate a network against an opponent.
 
@@ -163,6 +164,7 @@ def evaluate_against(
         num_games: number of games to play.
         setup_generator: optional setup generator for starting positions.
         rng: random number generator.
+        equity_weights: optional equity weights for move selection.
 
     Returns:
         Win rate of `network` (0.0 to 1.0).
@@ -190,6 +192,7 @@ def evaluate_against(
                 starting_state=start,
                 opponent=opponent,
                 epsilon=0.0, rng=rng,
+                equity_weights=equity_weights,
             )
             if record.result.value > 0:
                 wins += 1
@@ -200,6 +203,7 @@ def evaluate_against(
                 starting_state=start,
                 opponent=network,
                 epsilon=0.0, rng=rng,
+                equity_weights=equity_weights,
             )
             if record.result.value < 0:
                 wins += 1  # opponent lost = network wins
@@ -267,6 +271,11 @@ class Trainer:
         self.epsilon_start = train_config.get("epsilon_start", 0.10)
         self.epsilon_end = train_config.get("epsilon_end", 0.01)
         self.epsilon_decay_games = train_config.get("epsilon_decay_games", 200000)
+
+        # Equity weights for move selection
+        ew = train_config.get("equity_weights", [1, 2, 3, -1, -2, -3])
+        self.equity_weights = torch.tensor(ew, dtype=torch.float32)
+        print(f"Equity weights: {ew}")
 
         # Evaluation parameters
         eval_config = config.get("evaluation", {})
@@ -405,6 +414,7 @@ class Trainer:
                     starting_state=start,
                     opponent=opponent,
                     epsilon=0.0, rng=self.rng,
+                    equity_weights=self.equity_weights,
                 )
                 if record.result.value > 0:
                     wins += 1
@@ -414,6 +424,7 @@ class Trainer:
                     starting_state=start,
                     opponent=self.network,
                     epsilon=0.0, rng=self.rng,
+                    equity_weights=self.equity_weights,
                 )
                 if record.result.value < 0:
                     wins += 1  # opponent lost = our network wins
@@ -483,6 +494,7 @@ class Trainer:
                 self.network, self.play_device,
                 starting_state=start,
                 epsilon=epsilon, rng=self.rng,
+                equity_weights=self.equity_weights,
             )
 
             # 2. TD(λ) update on train device (GPU if available)
@@ -551,6 +563,7 @@ class Trainer:
         win_rate = evaluate_against(
             self.network, opponent, self.play_device,
             self.eval_match_size, self.setup_generator, self.rng,
+            equity_weights=self.equity_weights,
         )
         self.stats.rolling_win_rate = win_rate
         self.stats.rolling_eval_history.append(win_rate)
@@ -582,6 +595,7 @@ class Trainer:
         self.stats.current_level += 1
         self.stats.games_since_level_up = 0
         self.stats.rolling_eval_history.clear()
+        self.stats.rolling_win_rate = 0.5  # reset display to neutral
         self._failed_sprts_this_level = 0
 
         # Save checkpoint
@@ -600,4 +614,5 @@ class Trainer:
         return evaluate_against(
             self.network, random_net, self.play_device,
             self.eval_match_size, self.setup_generator, self.rng,
+            equity_weights=self.equity_weights,
         )

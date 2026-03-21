@@ -11,7 +11,7 @@ training:
   epsilon_start: 0.10             # ε-greedy start value
   epsilon_end: 0.01               # ε-greedy final value
   epsilon_decay_games: 200000     # games over which ε decays linearly
-  equity_weights: [1, 2, 3, -1, -2, -3]  # money play (default)
+  equity_weights: [1, 1, 1, -1, -2, -2]  # gammon-avoiding: leader 1a2aC
   # equity_weights: [1, 1, 1, -1, -1, -1]  # DMP (1a1a)
   # equity_weights: [1, 1, 1, -1, -2, -2]  # gammon-avoiding: leader 1a2aC (win=match, gammon/bg loss both lose match)
   # equity_weights: [1, 2, 2, -1, -1, -1]  # gammon-seeking: trailer 2a1aC (gammon/bg win both win match, any loss = 1pt)
