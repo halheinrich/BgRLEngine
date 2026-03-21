@@ -34,6 +34,9 @@ class GameRecord:
 
     Stores the sequence of board states (as feature vectors) and the
     final outcome for TD(λ) updates.
+
+    All states are encoded from the initial player's perspective.
+    The result is also from the initial player's perspective.
     """
     states: list[np.ndarray] = field(default_factory=list)
     result: GameResult = GameResult.IN_PROGRESS
@@ -205,8 +208,13 @@ def play_game(
     initial_player_turn = True  # track whose turn it is relative to initial player
 
     for move_num in range(max_moves):
-        # Encode current state from current player's perspective
-        features = encode_board(state)
+        # Always encode from the initial player's perspective for training.
+        # When it's the initial player's turn, state is already in their view.
+        # When it's the opponent's turn, state is in opponent's view — flip it.
+        if initial_player_turn:
+            features = encode_board(state)
+        else:
+            features = encode_board(flip_perspective(state))
         record.states.append(features)
 
         # Roll dice
@@ -231,8 +239,11 @@ def play_game(
         result = _determine_result(new_state, initial_player_turn)
         if result != GameResult.IN_PROGRESS:
             record.result = result
-            # Record the final state
-            record.states.append(encode_board(new_state))
+            # Record the final state from initial player's perspective
+            if initial_player_turn:
+                record.states.append(encode_board(new_state))
+            else:
+                record.states.append(encode_board(flip_perspective(new_state)))
             return record
 
         # Switch perspective for next turn

@@ -89,73 +89,57 @@ def td_lambda_update(
 ) -> float:
     """Perform TD(λ) weight update from a completed game.
 
-    The network is expected to already be on `device` (GPU) when called.
+    All states in the record are encoded from the initial player's
+    perspective, and the result is also from the initial player's
+    perspective. No perspective flipping needed.
 
-    Uses the sequence of states from the game record and the final
-    outcome to compute TD(λ) targets, then updates the network.
-
-    The update is a backward pass through the state sequence:
-    - The final state gets the actual outcome as its target
-    - Earlier states blend the network's prediction with the target
-      using the λ parameter (eligibility traces)
+    Batched: computes targets in one pass, then one forward+backward step.
 
     Args:
         network: the network to update (should be on `device`).
         optimizer: the optimizer.
         record: completed game record.
         td_lambda: the λ parameter (0 = TD(0), 1 = Monte Carlo).
-        device: torch device for training (typically GPU).
+        device: torch device for training.
 
     Returns:
-        Mean loss value for monitoring.
+        Loss value for monitoring.
     """
     if len(record.states) < 2:
         return 0.0
 
-    network.train()
+    # Stack all states into a single batch
+    states_np = np.stack(record.states)
+    states_batch = torch.from_numpy(states_np).to(device)
 
-    # Final target from game outcome
+    # Phase 1: compute TD(λ) targets (no gradients)
+    with torch.no_grad():
+        all_predictions = network(states_batch)  # shape: (T, 6)
+
+    # Final target from game outcome (same perspective as all states)
     final_target = torch.from_numpy(
         result_to_target(record.result)
     ).to(device)
 
-    # Convert all states to tensors on the training device
-    state_tensors = [
-        torch.from_numpy(s).to(device) for s in record.states
-    ]
+    # Build targets backward: target_t = (1-λ)*V(s_{t+1}) + λ*target_{t+1}
+    T = len(record.states)
+    targets = torch.zeros_like(all_predictions)
+    targets[-1] = final_target
 
-    # Compute TD(λ) targets backward through the game
-    # For the last state, target is the actual outcome
-    # For each earlier state t:
-    #   target_t = V(s_{t+1}) + λ * (target_{t+1} - V(s_{t+1}))
-    #   which simplifies to: target_t = (1-λ)*V(s_{t+1}) + λ*target_{t+1}
+    for t in range(T - 2, -1, -1):
+        next_pred = all_predictions[t + 1]
+        targets[t] = (1 - td_lambda) * next_pred + td_lambda * targets[t + 1]
 
-    total_loss = 0.0
-    target = final_target
+    # Phase 2: single forward pass with gradients + one optimizer step
+    network.train()
+    predictions = network(states_batch)
+    loss = nn.functional.mse_loss(predictions, targets)
 
-    # Process states from the end backward
-    for t in range(len(state_tensors) - 1, -1, -1):
-        state_t = state_tensors[t]
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 
-        # Forward pass to get current prediction
-        prediction = network(state_t.unsqueeze(0)).squeeze(0)
-
-        # Loss between prediction and target
-        loss = nn.functional.mse_loss(prediction, target)
-        total_loss += loss.item()
-
-        # Backprop and update
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        # Compute target for the previous state
-        if t > 0:
-            with torch.no_grad():
-                next_pred = network(state_t.unsqueeze(0)).squeeze(0)
-            target = (1 - td_lambda) * next_pred + td_lambda * target
-
-    return total_loss / len(state_tensors)
+    return loss.item()
 
 
 def evaluate_against(
