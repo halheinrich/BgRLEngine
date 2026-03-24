@@ -214,14 +214,8 @@ All source is in the repo. Key files for reference:
 - `configs/default.yaml` — all hyperparameters
 
 ## Shared rules
-Fetch and apply before starting work:
+See `AGENTS.md` in the umbrella repo — applies to all sub-projects.
 `https://raw.githubusercontent.com/halheinrich/backgammon/main/AGENTS.md`
-(GitHub raw URLs are blocked in Claude's container — paste this URL into chat and ask Claude to fetch it.)
-
-## Fetching source files
-GitHub (raw.githubusercontent.com) is blocked in Claude's container.
-**Workaround:** Ask Claude for the URLs needed, paste them back into the chat.
-Claude can then use web_fetch via the user-provided URLs.
 
 ## Session handoff
 After committing:
