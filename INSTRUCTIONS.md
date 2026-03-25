@@ -6,7 +6,7 @@ Part of the Backgammon tools ecosystem: https://github.com/halheinrich/backgammo
 ## Repo
 https://github.com/halheinrich/BgRLEngine
 **Branch:** main
-**Current commit:** 53fa520
+**Current commit:** 7d2481d
 
 ## Stack
 Python 3.11 / PyTorch 2.5.1+cu121 / Visual Studio 2026 (Python workload) / Windows
@@ -162,6 +162,7 @@ All variants use identical rules (hitting, bar re-entry, bearing off). Only star
 - Standalone — no C# ecosystem integration in Phase 1
 - State encoding: 303 features, no variant flags (rules are uniform)
 - Bg960 base model with fine-tuning for specific starting positions
+- BgMoveGen is sole source of truth for all starting positions
 
 ## Resolved questions
 1. ✅ Win rate significance: SPRT with p₀=0.70, p₁=0.76, α=0.05, β=0.10, 2000-game cap
@@ -189,31 +190,42 @@ All variants use identical rules (hitting, bar re-entry, bearing off). Only star
 - **Hard boundary for race detection**: Zero contact = race, else general engine. The general engine handles near-race positions adequately. Soft blending adds complexity without clear benefit in Phase 1. New seams (containment, back game) can be added later as branches in the router tree.
 
 ## In progress
-- BgMoveGen interop live: 7 → 13.2 games/s (+88%)
-- encode_board() is likely next bottleneck — microbenchmark to confirm
-- Long training run to find level ceiling (500K+ games)
-- Verify Nackgammon starting position accuracy
+- encode_board_batch complete: 7.5x encode speedup, 2.5x select_play speedup
+- DMP standard run complete — see Training results
+- Nackgammon DMP validated (1000-game smoke test, 21.6 games/s)
+- Long training runs for remaining configs pending
+
+## Training results
+| Config | Variant  | Games   | Time   | Rate       | Level ceiling |
+|--------|----------|---------|--------|------------|---------------|
+| DMP    | Standard | 225,000 | 2.5 hr | 25.4 g/s   | 4             |
 
 ## Deferred
-- encode_board() optimization (vectorize or move to C#)
 - Config-specific promotion metrics (match win rate, equity error, gammon rate)
 - Current 75% per-game threshold unreachable at higher levels due to dice variance
 - Match-based metric: best-of-N win rate to filter luck
-- Fix: SPRT failed counter not resetting after budget halving
 - C# move generation integration complete — next: multi-core parallelization of self-play
 - Bg960 starting positions (BgMoveGen deferred)
+- Best-of-3 series promotion metric — design questions settled, ready to implement
+- add "Bg960 via BgMoveGen — plan settled, C# work needed
 
 ## Source files
 All source is in the repo. Key files for reference:
 
-- `engine/state.py` — BoardState class, feature encoding
-- `engine/setup_generator.py` — Bg960 position generator
-- `engine/network.py` — TDNetwork definition
-- `engine/dice.py` — legal move generation
-- `engine/game.py` — self-play simulation
-- `training/td_trainer.py` — training loop orchestrator
-- `utils/sprt.py` — SPRT implementation
-- `configs/default.yaml` — all hyperparameters
+- `BgRLEngine/engine/state.py` — BoardState class, feature encoding
+- `BgRLEngine/engine/setup_generator.py` — Bg960 position generator
+- `BgRLEngine/engine/network.py` — TDNetwork definition
+- `BgRLEngine/engine/dice.py` — pure Python move generation (tests only)
+- `BgRLEngine/engine/game.py` — self-play simulation
+- `BgRLEngine/engine/movegen.py` — BgMoveGen ctypes wrapper
+- `BgRLEngine/training/td_trainer.py` — training loop orchestrator
+- `BgRLEngine/utils/sprt.py` — SPRT implementation
+- `BgRLEngine/main.py` — entry point
+- `BgRLEngine/configs/default.yaml` — base hyperparameters
+- `BgRLEngine/configs/dmp.yaml`
+- `BgRLEngine/configs/gammon_avoiding.yaml`
+- `BgRLEngine/configs/gammon_seeking.yaml`
+- `BgRLEngine/configs/money.yaml`
 
 ## Shared rules
 See `AGENTS.md` in the umbrella repo — applies to all sub-projects.
