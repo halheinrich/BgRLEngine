@@ -6,7 +6,7 @@ Part of the Backgammon tools ecosystem: https://github.com/halheinrich/backgammo
 ## Repo
 https://github.com/halheinrich/BgRLEngine
 **Branch:** main
-**Current commit:** 5365dc7
+**Current commit:** 53fa520
 
 ## Stack
 Python 3.11 / PyTorch 2.5.1+cu121 / Visual Studio 2026 (Python workload) / Windows
@@ -29,10 +29,10 @@ BgRLEngine/
 ├── configs/
 │   └── default.yaml           ← training hyperparameters
 ├── engine/
-│   ├── state.py               ← BoardState, 303-feature encoding, flip_perspective
-│   ├── setup_generator.py     ← Bg960 starting position generator
+│   ├── state.py               ← BoardState, 303-feature encoding
+│   ├── movegen.py             ← BgMoveGen ctypes wrapper
 │   ├── network.py             ← TDNetwork (PyTorch), equity computation
-│   ├── dice.py                ← dice rolling, legal move generation
+│   ├── dice.py                ← superseded by BgMoveGen; kept for tests
 │   └── game.py                ← self-play game simulation
 ├── training/
 │   └── td_trainer.py          ← TD(λ) training loop, evaluation, SPRT, plateau detection
@@ -171,12 +171,13 @@ All variants use identical rules (hitting, bar re-entry, bearing off). Only star
 5. ✅ Seam handling: hard boundary (zero contact), extensible router tree
 
 ## Known pitfalls
-- **int16 for points array**: `BoardState.points` must be `np.int16`, not `int8`. Pip count calculations overflow int8 (max 127) since pip values reach 15×24=360. Same applies to `setup_generator._distribute_checkers`. All pip count methods must cast to `int()` before multiplication to avoid numpy scalar overflow.
-- **Mirror conflicts in Bg960**: `setup_generator._select_points` must ensure point i and point (23-i) are never both selected. Otherwise `_mirror_setup` places opponent checkers on top of player checkers, corrupting the net count. The fix tracks a `blocked` set that excludes mirrors of every selected point.
 - **Two-network evaluation**: `play_game()` takes an optional `opponent` parameter. Without it, both sides use the same network (self-play for training). `evaluate_against` and `_run_sprt` must pass the opponent network — otherwise they test self-play and always get ~50% win rate.
 - **UTF-8 encoding on Windows**: All `open()` calls for config/data files must specify `encoding="utf-8"`. Windows defaults to cp1252 which chokes on YAML comments with special characters.
 - **PyTorch API**: Use `torch.cuda.get_device_properties(0).total_memory` (not `total_mem`).
 - **PowerShell and .bat files**: Use `cmd /c setup_env.bat` from PowerShell. `.\setup_env.bat` doesn't work.
+- **BgMoveGen dll_path**: currently hardcoded as absolute path in default.yaml. Relative paths resolve from the working directory, not the repo root — use absolute paths until a --movegen-dll CLI arg is added.
+- **NativeAOT publish**: must publish the BgMoveGen project explicitly: `dotnet publish BgMoveGen/BgMoveGen.csproj -c Release -r win-x64`. Running `dotnet publish` from the solution root publishes managed only.
+- **PowerShell `&&`**: not a valid statement separator — use two separate commands.
 
 ## Design rationale (for future sessions)
 - **SPRT over fixed-sample test**: SPRT naturally balances error rates against compute cost. Strong checkpoints promote in ~150 games; borderline ones spend ~1000 games in the indifference zone; clearly weak ones reject fast. Fixed-sample wastes games on obvious cases.
@@ -188,18 +189,19 @@ All variants use identical rules (hitting, bar re-entry, bearing off). Only star
 - **Hard boundary for race detection**: Zero contact = race, else general engine. The general engine handles near-race positions adequately. Soft blending adds complexity without clear benefit in Phase 1. New seams (containment, back game) can be added later as branches in the router tree.
 
 ## In progress
-- Training validated: level 3 in 10K games at ~7 games/s across all equity configs
-- Four equity weight configs validated: money, DMP, gammon-seeking, gammon-avoiding
+- BgMoveGen interop live: 7 → 13.2 games/s (+88%)
+- encode_board() is likely next bottleneck — microbenchmark to confirm
 - Long training run to find level ceiling (500K+ games)
 - Verify Nackgammon starting position accuracy
 
 ## Deferred
+- encode_board() optimization (vectorize or move to C#)
 - Config-specific promotion metrics (match win rate, equity error, gammon rate)
 - Current 75% per-game threshold unreachable at higher levels due to dice variance
 - Match-based metric: best-of-N win rate to filter luck
 - Fix: SPRT failed counter not resetting after budget halving
-- C# move generation integration (BgMoveGen)
-- Multi-core parallelization of self-play
+- C# move generation integration complete — next: multi-core parallelization of self-play
+- Bg960 starting positions (BgMoveGen deferred)
 
 ## Source files
 All source is in the repo. Key files for reference:
