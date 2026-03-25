@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Optional
 
-from engine.state import BoardState, encode_board
+from engine.state import BoardState, encode_board, encode_board_batch
 from engine.dice import roll_dice
 from engine.movegen import generate_successor_states
 from engine.network import TDNetwork, compute_equity
@@ -120,11 +120,8 @@ def select_play(
     if epsilon > 0 and rng.random() < epsilon:
         return successors[rng.integers(0, len(successors))]
 
-    # Encode all successors — already on-roll player's perspective
-    features_list = [encode_board(s) for s in successors]
-
-    # Batched forward pass
-    batch = torch.from_numpy(np.stack(features_list)).to(device)
+    # Encode all successors in one vectorized call and run forward pass
+    batch = torch.from_numpy(encode_board_batch(successors)).to(device)
     with torch.no_grad():
         outputs = network(batch)
 

@@ -547,6 +547,7 @@ class Trainer:
                 if self._failed_sprts_this_level >= self.max_failed_sprts:
                     remaining = self._current_budget() - self.stats.games_since_level_up
                     self.stats.games_since_level_up += remaining // 2
+                    self._failed_sprts_this_level = 0  # reset after halving
                     print(f"  Budget halved after {self.max_failed_sprts} failed SPRTs")
 
     def _promote(self) -> None:

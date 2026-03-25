@@ -50,7 +50,10 @@ BOARD_FEATURE_SIZE = (
 CUBE_FEATURES = 4  # log2(cube)/6, player_owns, opp_owns, centered
 MATCH_FEATURES = 4  # player_away/N, opp_away/N, crawford, post_crawford
 FULL_FEATURE_SIZE = BOARD_FEATURE_SIZE + CUBE_FEATURES + MATCH_FEATURES  # 311
-
+# Vectorized encoding — precomputed weights for encode_board_batch()
+_PLAYER_PIP_WEIGHTS   = np.arange(1, NUM_POINTS + 1, dtype=np.float32)   # [1..24]
+_OPPONENT_PIP_WEIGHTS = np.arange(NUM_POINTS, 0, -1, dtype=np.float32)   # [24..1]
+_THERMO_THRESH        = np.arange(1, THERMOMETER_DEPTH + 1, dtype=np.float32)  # shape (5,)
 
 class BoardState:
     """Represents a backgammon board position.
@@ -316,6 +319,170 @@ def encode_board(state: BoardState) -> np.ndarray:
     assert idx == BOARD_FEATURE_SIZE
     return features
 
+def _encode_points_batch(counts: np.ndarray) -> np.ndarray:
+    N = counts.shape[0]
+    out = np.zeros((N, NUM_POINTS * UNITS_PER_POINT), dtype=np.float32)
+
+    # thresholds shape (5,), counts shape (N, 24, 1) → broadcast to (N, 24, 5)
+    thermo = (counts[:, :, np.newaxis] >= _THERMO_THRESH.reshape(THERMOMETER_DEPTH)).astype(np.float32)
+    # thermo: (N, 24, 5)
+
+    overflow = np.clip(
+        (counts - THERMOMETER_DEPTH) / OVERFLOW_SCALE, 0.0, 1.0
+    )  # (N, 24)
+
+    out_3d = out.reshape(N, NUM_POINTS, UNITS_PER_POINT)
+    out_3d[:, :, :THERMOMETER_DEPTH] = thermo
+    out_3d[:, :, THERMOMETER_DEPTH]  = overflow
+
+    return out  # (N, 144)
+
+def _encode_bar_batch(counts: np.ndarray) -> np.ndarray:
+    """Vectorized bar encoding (thermometer 1,2,3+).
+ 
+    Args:
+        counts: shape (N,), integer bar counts.
+ 
+    Returns:
+        shape (N, BAR_FEATURES) = (N, 3), float32.
+    """
+    N = counts.shape[0]
+    out = np.zeros((N, BAR_FEATURES), dtype=np.float32)
+    for i in range(BAR_FEATURES):
+        out[:, i] = (counts > i).astype(np.float32)
+    return out
+ 
+ 
+def _encode_borne_off_batch(counts: np.ndarray) -> np.ndarray:
+    """Vectorized borne-off encoding (fraction, all_off flag).
+ 
+    Args:
+        counts: shape (N,), integer borne-off counts.
+ 
+    Returns:
+        shape (N, BORNE_OFF_FEATURES) = (N, 2), float32.
+    """
+    out = np.empty((N := counts.shape[0], BORNE_OFF_FEATURES), dtype=np.float32)
+    out[:, 0] = counts / CHECKERS_PER_PLAYER
+    out[:, 1] = (counts >= CHECKERS_PER_PLAYER).astype(np.float32)
+    return out
+ 
+ 
+def encode_board_batch(states: list) -> np.ndarray:
+    """Encode a list of BoardStates into a batch feature matrix.
+ 
+    Drop-in replacement for [encode_board(s) for s in states] followed
+    by np.stack(). Returns the same values as stacking individual
+    encode_board() calls, but computed in vectorized NumPy operations.
+ 
+    Args:
+        states: list of N BoardState objects.
+ 
+    Returns:
+        Float32 array of shape (N, BOARD_FEATURE_SIZE) = (N, 303).
+    """
+    N = len(states)
+    if N == 0:
+        return np.empty((0, BOARD_FEATURE_SIZE), dtype=np.float32)
+ 
+    # --- Extract raw arrays from all states ---
+    # points: (N, 24)
+    points = np.stack([s.points for s in states]).astype(np.float32)
+ 
+    # Scalar fields: (N,)
+    bar_player   = np.array([s.bar_player   for s in states], dtype=np.float32)
+    bar_opp      = np.array([s.bar_opponent for s in states], dtype=np.float32)
+    off_player   = np.array([s.off_player   for s in states], dtype=np.float32)
+    off_opp      = np.array([s.off_opponent for s in states], dtype=np.float32)
+    on_roll      = np.array([1.0 if s.player_to_move else 0.0 for s in states],
+                            dtype=np.float32)
+ 
+    # --- Point encoding ---
+    player_counts   = np.maximum(points,  0.0)   # (N, 24)
+    opponent_counts = np.maximum(-points, 0.0)   # (N, 24)
+ 
+    player_point_feats   = _encode_points_batch(player_counts)    # (N, 144)
+    opponent_point_feats = _encode_points_batch(opponent_counts)  # (N, 144)
+ 
+    # --- Bar encoding ---
+    bar_player_feats = _encode_bar_batch(bar_player.astype(np.int32))   # (N, 3)
+    bar_opp_feats    = _encode_bar_batch(bar_opp.astype(np.int32))      # (N, 3)
+ 
+    # --- Borne-off encoding ---
+    off_player_feats = _encode_borne_off_batch(off_player.astype(np.int32))  # (N, 2)
+    off_opp_feats    = _encode_borne_off_batch(off_opp.astype(np.int32))     # (N, 2)
+ 
+    # --- Global features ---
+ 
+    # Pip counts via dot product — shape (N,)
+    p_pips = player_counts   @ _PLAYER_PIP_WEIGHTS    # sum(count[i] * (i+1))
+    o_pips = opponent_counts @ _OPPONENT_PIP_WEIGHTS  # sum(count[i] * (24-i))
+    p_pips += bar_player * 25.0
+    o_pips += bar_opp    * 25.0
+    total_pips = p_pips + o_pips
+    pip_ratio = np.where(total_pips > 0, p_pips / total_pips, 0.5)  # (N,)
+ 
+    # Race detection — True if no player checker is at index >= lowest opponent checker
+    # Vectorized: find highest player idx and lowest opponent idx per state
+    player_mask   = player_counts   > 0   # (N, 24)
+    opponent_mask = opponent_counts > 0   # (N, 24)
+ 
+    # bar_player > 0 or bar_opp > 0 → not a race
+    has_bar = (bar_player > 0) | (bar_opp > 0)
+ 
+    # highest player index: max index where player has checkers (-1 if none)
+    idx_range = np.arange(NUM_POINTS, dtype=np.float32)  # [0..23]
+    highest_player = np.where(
+        player_mask.any(axis=1),
+        (player_mask * idx_range).max(axis=1),
+        -1.0,
+    )
+    # lowest opponent index: min index where opponent has checkers (-1 if none)
+    # invert: use (23 - idx) trick, find max, then invert back
+    inv_mask = opponent_mask * (NUM_POINTS - 1 - idx_range)
+    lowest_opp = np.where(
+        opponent_mask.any(axis=1),
+        NUM_POINTS - 1 - inv_mask.max(axis=1),
+        -1.0,
+    )
+ 
+    no_opp_on_board    = ~opponent_mask.any(axis=1)
+    no_player_on_board = ~player_mask.any(axis=1)
+    is_race = (
+        ~has_bar
+        & (no_opp_on_board | no_player_on_board | (highest_player < lowest_opp))
+    ).astype(np.float32)  # (N,)
+ 
+    # Checker counts
+    player_checker_count = (player_counts.sum(axis=1) + bar_player) / CHECKERS_PER_PLAYER
+    opp_checker_count    = (opponent_counts.sum(axis=1) + bar_opp)  / CHECKERS_PER_PLAYER
+ 
+    # Global feature block: (N, 5)
+    global_feats = np.stack([
+        on_roll,
+        pip_ratio,
+        is_race,
+        player_checker_count,
+        opp_checker_count,
+    ], axis=1)
+ 
+    # --- Concatenate all blocks ---
+    # (N,144) + (N,144) + (N,3) + (N,3) + (N,2) + (N,2) + (N,5) = (N,303)
+    result = np.concatenate([
+        player_point_feats,
+        opponent_point_feats,
+        bar_player_feats,
+        bar_opp_feats,
+        off_player_feats,
+        off_opp_feats,
+        global_feats,
+    ], axis=1)
+ 
+    assert result.shape == (N, BOARD_FEATURE_SIZE), \
+        f"encode_board_batch: expected ({N}, {BOARD_FEATURE_SIZE}), got {result.shape}"
+ 
+    return result
+ 
 
 def encode_cube(cube_value: int = 1, owner: int = 0) -> np.ndarray:
     """Encode cube state.
