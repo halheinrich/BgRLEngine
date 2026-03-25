@@ -1,7 +1,7 @@
 # BgRLEngine training configuration
 
 movegen:
-  dll_path: D:/Users/Hal/Documents/Visual Studio 2026/Projects/backgammon/BgMoveGen/BgMoveGen/bin/Release/net10.0/win-x64/publish/BgMoveGen.dll
+  dll_path: native/BgMoveGen.dll  # relative to BgRLEngine/BgRLEngine/
   variant:  standard
 
 network:
@@ -16,9 +16,6 @@ training:
   epsilon_end:          0.01     # ε-greedy final value
   epsilon_decay_games:  200000   # games over which ε decays linearly
   equity_weights: [1, 2, 3, -1, -2, -3]  # money play (default)
-  # equity_weights: [1, 1, 1, -1, -1, -1]      # DMP (1a1a)
-  # equity_weights: [1, 1, 1, -1, -2, -2]      # gammon-avoiding
-  # equity_weights: [1, 2, 2, -1, -1, -1]      # gammon-seeking
 
 evaluation:
   cadence_games:   1000   # evaluate every N training games
@@ -33,11 +30,11 @@ sprt:
   gate_threshold: 0.70    # rolling win rate to trigger SPRT
 
 plateau:
-  base_budget:              500000  # base games budget for level 0→1
-  budget_scale:             1.5     # multiply budget by this per level
-  staleness_window:         200000  # game window for staleness check
-  staleness_min_improvement: 0.02   # minimum win rate improvement in window
-  max_failed_sprts:         3       # failed SPRTs before halving remaining budget
+  base_budget:               500000  # base games budget for level 0→1
+  budget_scale:              1.5     # multiply budget by this per level
+  staleness_window:          200000  # game window for staleness check
+  staleness_min_improvement: 0.02    # minimum win rate improvement in window
+  max_failed_sprts:          3       # failed SPRTs before halving remaining budget
 
 device: auto   # auto | cpu | cuda
 seed:   null   # random seed (null = random)

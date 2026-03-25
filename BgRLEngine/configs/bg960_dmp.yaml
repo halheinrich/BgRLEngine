@@ -1,8 +1,8 @@
-# BgRLEngine training configuration — Nackgammon DMP
+# BgRLEngine training configuration — Bg960 DMP
 
 movegen:
   dll_path: native/BgMoveGen.dll
-  variant:  nackgammon
+  variant:  bg960
 
 network:
   hidden_layers: [256, 256]       # 2 hidden layers, 256 units each

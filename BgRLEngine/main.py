@@ -74,13 +74,11 @@ def main() -> None:
         config = {}
 
     # Load BgMoveGen
-    from engine.movegen import load_movegen
+    from engine.movegen import load_movegen, _DEFAULT_DLL_PATH
     movegen_cfg = config.get("movegen", {})
-    dll_path    = movegen_cfg.get("dll_path")
-    if not dll_path:
-        raise RuntimeError("movegen.dll_path must be set in config")
+    dll_path    = movegen_cfg.get("dll_path")  # None = use default native/ path
     load_movegen(dll_path)
-    print(f"Loaded BgMoveGen from {dll_path}")
+    print(f"Loaded BgMoveGen from {dll_path or _DEFAULT_DLL_PATH}")
 
     # Device
     device = get_device(config.get("device", "auto"))

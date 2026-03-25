@@ -1,7 +1,7 @@
 # BgRLEngine training configuration
 
 movegen:
-  dll_path: D:/Users/Hal/Documents/Visual Studio 2026/Projects/backgammon/BgMoveGen/BgMoveGen/bin/Release/net10.0/win-x64/publish/BgMoveGen.dll
+  dll_path: native/BgMoveGen.dll
   variant:  standard
 
 network:

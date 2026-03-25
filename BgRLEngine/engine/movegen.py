@@ -30,6 +30,19 @@ import numpy as np
 from engine.state import BoardState, NUM_POINTS
 
 
+# ── Required DLL version ─────────────────────────────────────────────────────
+
+# Bump this when BgRLEngine requires a new BgMoveGen capability.
+# BgMoveGen must report this exact version via get_version() or load_movegen()
+# will hard-fail with a clear message.
+REQUIRED_MOVEGEN_VERSION: int = 100
+
+# Default DLL location — relative to this file's package root.
+# Checked into BgRLEngine/native/BgMoveGen.dll so the repo is self-contained.
+# Override via load_movegen(dll_path=...) or the movegen.dll_path config key.
+_DEFAULT_DLL_PATH = Path(__file__).parent.parent / "native" / "BgMoveGen.dll"
+
+
 # ── Variant enum ────────────────────────────────────────────────────────────
 
 class Variant(IntEnum):
@@ -62,10 +75,36 @@ _lib: ctypes.CDLL | None = None
 
 # ── Library loading ──────────────────────────────────────────────────────────
 
-def load_movegen(dll_path: str | Path) -> None:
-    """Load the BgMoveGen shared library. Call once at startup."""
+def load_movegen(dll_path: str | Path | None = None) -> None:
+    """Load the BgMoveGen shared library and verify its version.
+
+    Args:
+        dll_path: path to BgMoveGen.dll. Defaults to native/BgMoveGen.dll
+                  relative to the repo root. Pass None to use the default.
+
+    Raises:
+        FileNotFoundError: DLL not found at the given path.
+        RuntimeError:      DLL version does not match REQUIRED_MOVEGEN_VERSION.
+    """
     global _lib
-    _lib = ctypes.CDLL(str(dll_path))
+
+    path = Path(dll_path) if dll_path is not None else _DEFAULT_DLL_PATH
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"BgMoveGen DLL not found: {path}\n"
+            f"  If using the default path, copy BgMoveGen.dll to "
+            f"native/BgMoveGen.dll in the repo root.\n"
+            f"  If using a custom path, set movegen.dll_path in your config."
+        )
+
+    _lib = ctypes.CDLL(str(path))
+
+    # ── Wire up exports ──────────────────────────────────────────────────────
+
+    gv = _lib.get_version
+    gv.restype  = ctypes.c_int
+    gv.argtypes = []
 
     gss = _lib.generate_successor_states
     gss.restype  = ctypes.c_int
@@ -84,6 +123,17 @@ def load_movegen(dll_path: str | Path) -> None:
         ctypes.c_int,                   # seed (-1 = no seed)
         ctypes.POINTER(_BgBoardState),  # output
     ]
+
+    # ── Version check ────────────────────────────────────────────────────────
+
+    actual = _lib.get_version()
+    if actual != REQUIRED_MOVEGEN_VERSION:
+        _lib = None
+        raise RuntimeError(
+            f"BgMoveGen version mismatch: "
+            f"expected {REQUIRED_MOVEGEN_VERSION}, got {actual}.\n"
+            f"  Republish BgMoveGen and copy the new DLL to {path}"
+        )
 
 
 # ── Marshal helpers ──────────────────────────────────────────────────────────
@@ -142,8 +192,8 @@ def generate_successor_states(
 
 
 def get_starting_position(
-    variant: Variant | int   = Variant.STANDARD,
-    seed:    Optional[int]   = None,
+    variant: Variant | int = Variant.STANDARD,
+    seed:    Optional[int] = None,
 ) -> BoardState:
     """Return a starting BoardState for the requested variant.
 
