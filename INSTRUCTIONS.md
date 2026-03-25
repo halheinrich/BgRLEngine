@@ -196,11 +196,13 @@ All variants use identical rules (hitting, bar re-entry, bearing off). Only star
 - Long training runs for remaining configs pending
 
 ## Training results
-| Config | Variant   | Games   | Time   | Rate     | Level ceiling |
-|--------|-----------|---------|--------|----------|---------------|
-| DMP    | Standard  | 225,000 | 2.5 hr | 25.4 g/s | 4             |
-| DMP    | Nackgammon| 1,000   | smoke  | 21.6 g/s | —             |
-| DMP    | Bg960     | 1,000   | smoke  | 23.7 g/s | —             |
+| Config | Variant    | Games   | Time   | Rate     | Level ceiling |
+|--------|------------|---------|--------|----------|---------------|
+| DMP    | Standard   | 225,000 | 2.5 hr | 25.4 g/s | 4             |
+| DMP    | Nackgammon | 99,580  | 1.7 hr | 16.3 g/s | 4             |
+| DMP    | Bg960      | 204,417 | 2.9 hr | 19.7 g/s | 4             |
+- Level 4 is the current ceiling across all variants under the single-game promotion metric.
+- Dice variance prevents reliable SPRT promotion at Level 4→5. Best-of-3 series metric is the next step.
 
 ## Deferred
 - Config-specific promotion metrics (match win rate, equity error, gammon rate)
