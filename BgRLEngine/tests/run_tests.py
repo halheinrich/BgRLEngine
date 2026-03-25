@@ -2,14 +2,18 @@
 
 Tests the pure-Python/numpy modules: state encoding, setup generator,
 SPRT logic, and dice/move generation.
+
+Usage (from BgRLEngine\BgRLEngine\):
+    python tests/run_tests.py
 """
 
 import sys
 import traceback
 import numpy as np
+from pathlib import Path
 
 # Add project root to path
-sys.path.insert(0, "/home/claude/bgrle")
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 passed = 0
 failed = 0
@@ -30,6 +34,17 @@ def test(name):
             print(f"  ✗ {name}: {e}")
         return fn
     return decorator
+
+
+# ── Load BgMoveGen ─────────────────────────────────────────────────
+
+import yaml
+from engine.movegen import load_movegen, get_starting_position, Variant
+
+config_path = Path(__file__).parent.parent / "configs" / "default.yaml"
+with open(config_path, encoding="utf-8") as f:
+    _config = yaml.safe_load(f)
+load_movegen(_config["movegen"]["dll_path"])
 
 
 # ── State encoding ─────────────────────────────────────────────────
@@ -110,13 +125,28 @@ def _():
     assert state.opponent_pip_count() == 167, f"Got {state.opponent_pip_count()}"
 
 
-@test("nackgammon setup: 15 checkers per side")
+@test("nackgammon: 15 checkers per side (via BgMoveGen)")
 def _():
-    state = BoardState.nackgammon_setup()
+    state = get_starting_position(Variant.NACKGAMMON)
     player = sum(max(0, state.points[i]) for i in range(24))
     opponent = sum(abs(min(0, state.points[i])) for i in range(24))
-    assert player == 15
-    assert opponent == 15
+    assert player == 15, f"Player has {player}"
+    assert opponent == 15, f"Opponent has {opponent}"
+
+
+@test("nackgammon: authoritative layout (via BgMoveGen)")
+def _():
+    state = get_starting_position(Variant.NACKGAMMON)
+    assert state.points[5]  ==  4
+    assert state.points[7]  ==  3
+    assert state.points[12] ==  4
+    assert state.points[22] ==  2
+    assert state.points[23] ==  2
+    assert state.points[18] == -4
+    assert state.points[16] == -3
+    assert state.points[11] == -4
+    assert state.points[1]  == -2
+    assert state.points[0]  == -2
 
 
 @test("standard setup: not a race")
@@ -276,7 +306,7 @@ def _():
 def _():
     state = BoardState()
     state.points[5] = 5; state.points[3] = 5; state.points[1] = 5
-    state.points[23] = -15  # opponent far away
+    state.points[23] = -15
     plays = generate_plays(state, 6, 4)
     assert len(plays) > 0
     has_bear_off = any(
@@ -289,7 +319,6 @@ def _():
 def _():
     state = BoardState.standard_setup()
     plays = generate_plays(state, 6, 1)
-    # All plays should use 2 moves
     for p in plays:
         assert p.num_moves == 2, f"Play uses {p.num_moves} moves"
 

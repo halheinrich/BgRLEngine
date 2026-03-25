@@ -2,6 +2,8 @@
 
 import numpy as np
 import pytest
+import yaml
+from pathlib import Path
 
 from engine.state import (
     BoardState, encode_board, encode_point, encode_bar,
@@ -12,6 +14,19 @@ from engine.setup_generator import SetupGenerator, QUADRANTS
 from engine.dice import roll_dice, generate_plays, get_dice_to_use
 from engine.network import TDNetwork, compute_equity, NUM_OUTPUTS
 from training.td_trainer import sprt_test, SPRTResult, result_to_target
+
+
+# ── BgMoveGen fixture ──────────────────────────────────────────────
+
+@pytest.fixture(scope="session", autouse=True)
+def load_movegen_fixture():
+    """Load BgMoveGen DLL once per test session."""
+    from engine.movegen import load_movegen, Variant
+    config_path = Path("configs/default.yaml")
+    with open(config_path, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    dll_path = config["movegen"]["dll_path"]
+    load_movegen(dll_path)
 
 
 # ── State encoding tests ───────────────────────────────────────────
@@ -81,15 +96,32 @@ class TestBoardState:
         assert opponent == 15
 
     def test_nackgammon_setup_checker_count(self):
-        state = BoardState.nackgammon_setup()
+        from engine.movegen import get_starting_position, Variant
+        state = get_starting_position(Variant.NACKGAMMON)
         player = sum(max(0, state.points[i]) for i in range(24))
         opponent = sum(abs(min(0, state.points[i])) for i in range(24))
         assert player == 15
         assert opponent == 15
 
+    def test_nackgammon_layout(self):
+        """Verify authoritative Nackgammon position."""
+        from engine.movegen import get_starting_position, Variant
+        state = get_starting_position(Variant.NACKGAMMON)
+        # Player: 4@idx5, 3@idx7, 4@idx12, 2@idx22, 2@idx23
+        assert state.points[5]  ==  4
+        assert state.points[7]  ==  3
+        assert state.points[12] ==  4
+        assert state.points[22] ==  2
+        assert state.points[23] ==  2
+        # Opponent: -4@idx18, -3@idx16, -4@idx11, -2@idx1, -2@idx0
+        assert state.points[18] == -4
+        assert state.points[16] == -3
+        assert state.points[11] == -4
+        assert state.points[1]  == -2
+        assert state.points[0]  == -2
+
     def test_standard_pip_count(self):
         state = BoardState.standard_setup()
-        # Standard bg pip count = 167
         assert state.player_pip_count() == 167
         assert state.opponent_pip_count() == 167
 
@@ -99,10 +131,9 @@ class TestBoardState:
 
     def test_is_race_separated(self):
         state = BoardState()
-        # All player checkers in home board, all opponent in their home board
-        state.points[0] = 5   # player on point 1
-        state.points[3] = 5   # player on point 4
-        state.points[5] = 5   # player on point 6
+        state.points[0] = 5
+        state.points[3] = 5
+        state.points[5] = 5
         state.points[18] = -5
         state.points[20] = -5
         state.points[23] = -5
@@ -123,7 +154,6 @@ class TestFlipPerspective:
     def test_flip_preserves_checkers(self):
         state = BoardState.standard_setup()
         flipped = flip_perspective(state)
-        # After flip, what was opponent's checkers become player's
         player_orig = sum(max(0, state.points[i]) for i in range(24))
         player_flip = sum(max(0, flipped.points[i]) for i in range(24))
         opponent_orig = sum(abs(min(0, state.points[i])) for i in range(24))
@@ -185,10 +215,6 @@ class TestSetupGenerator:
         state = self.gen.standard()
         assert sum(max(0, state.points[i]) for i in range(24)) == 15
 
-    def test_nackgammon_is_valid(self):
-        state = self.gen.nackgammon()
-        assert sum(max(0, state.points[i]) for i in range(24)) == 15
-
     def test_batch_generation(self):
         batch = self.gen.generate_batch(10)
         assert len(batch) == 10
@@ -220,34 +246,26 @@ class TestDice:
 class TestMoveGeneration:
     def test_opening_move_count(self):
         state = BoardState.standard_setup()
-        # 3-1 opening: known to have specific number of legal plays
         plays = generate_plays(state, 3, 1)
-        # Should have at least a few plays
         assert len(plays) > 0
 
     def test_no_legal_moves(self):
-        # Create a position where the player is on the bar
-        # and opponent holds the entire entry area
         state = BoardState()
         state.bar_player = 1
-        # Opponent makes all 6 points in their home board (player's 19-24)
         for i in range(18, 24):
             state.points[i] = -2
         plays = generate_plays(state, 3, 1)
-        # Should get an empty play (no moves possible)
         assert len(plays) == 1
         assert plays[0].num_moves == 0
 
     def test_bearing_off(self):
         state = BoardState()
-        state.points[5] = 5  # 5 on the 6-point
-        state.points[3] = 5  # 5 on the 4-point
-        state.points[1] = 5  # 5 on the 2-point
-        # Put opponent checkers far away (no contact)
+        state.points[5] = 5
+        state.points[3] = 5
+        state.points[1] = 5
         state.points[23] = -15
         plays = generate_plays(state, 6, 4)
         assert len(plays) > 0
-        # At least one play should bear off a checker
         has_bear_off = any(
             any(m.dest == -1 for m in p.moves)
             for p in plays
@@ -281,12 +299,10 @@ class TestNetwork:
 
     def test_equity_computation(self):
         import torch
-        # Pure win: P(win)=1, rest=0
         output = torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
         eq = compute_equity(output)
         assert eq.item() == pytest.approx(1.0)
 
-        # Pure gammon loss
         output = torch.tensor([[0.0, 0.0, 0.0, 0.0, 1.0, 0.0]])
         eq = compute_equity(output)
         assert eq.item() == pytest.approx(-2.0)
@@ -296,22 +312,18 @@ class TestNetwork:
 
 class TestSPRT:
     def test_early_strong_accept(self):
-        # Overwhelming wins should accept quickly
         result = sprt_test(wins=95, games=100)
         assert result == SPRTResult.ACCEPT
 
     def test_early_strong_reject(self):
-        # Overwhelming losses should reject quickly
         result = sprt_test(wins=30, games=100)
         assert result == SPRTResult.REJECT
 
     def test_continue_ambiguous(self):
-        # Close to boundary should continue
         result = sprt_test(wins=73, games=100)
         assert result == SPRTResult.CONTINUE
 
     def test_hard_cap_rejects(self):
-        # At hard cap, should reject
         result = sprt_test(wins=1460, games=2000)
         assert result == SPRTResult.REJECT
 

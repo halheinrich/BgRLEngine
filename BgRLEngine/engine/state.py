@@ -144,29 +144,6 @@ class BoardState:
         setup[0] = -2
         return BoardState.from_setup(setup)
 
-    @staticmethod
-    def nackgammon_setup() -> BoardState:
-        """Nackgammon starting position (Nack Ballard variant)."""
-        setup = np.zeros(NUM_POINTS, dtype=np.int16)
-        # Player's checkers:
-        #   point 6 (idx 5):  4
-        #   point 8 (idx 7):  3
-        #   point 13 (idx 12): 4
-        #   point 23 (idx 22): 2
-        #   point 24 (idx 23): 2
-        setup[5] = 4
-        setup[7] = 3
-        setup[12] = 4
-        setup[22] = 2
-        setup[23] = 2
-        # Opponent mirrored:
-        setup[18] = -4
-        setup[16] = -3
-        setup[11] = -4
-        setup[1] = -2
-        setup[0] = -2
-        return BoardState.from_setup(setup)
-
     def player_pip_count(self) -> int:
         """Total pip count for the player (distance to bear off)."""
         pips = 0
