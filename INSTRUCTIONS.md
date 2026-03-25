@@ -6,7 +6,7 @@ Part of the Backgammon tools ecosystem: https://github.com/halheinrich/backgammo
 ## Repo
 https://github.com/halheinrich/BgRLEngine
 **Branch:** main
-**Current commit:** 7d2481d
+**Current commit:** 3e67db8
 
 ## Stack
 Python 3.11 / PyTorch 2.5.1+cu121 / Visual Studio 2026 (Python workload) / Windows
@@ -176,9 +176,9 @@ All variants use identical rules (hitting, bar re-entry, bearing off). Only star
 - **UTF-8 encoding on Windows**: All `open()` calls for config/data files must specify `encoding="utf-8"`. Windows defaults to cp1252 which chokes on YAML comments with special characters.
 - **PyTorch API**: Use `torch.cuda.get_device_properties(0).total_memory` (not `total_mem`).
 - **PowerShell and .bat files**: Use `cmd /c setup_env.bat` from PowerShell. `.\setup_env.bat` doesn't work.
-- **BgMoveGen dll_path**: currently hardcoded as absolute path in default.yaml. Relative paths resolve from the working directory, not the repo root — use absolute paths until a --movegen-dll CLI arg is added.
-- **NativeAOT publish**: must publish the BgMoveGen project explicitly: `dotnet publish BgMoveGen/BgMoveGen.csproj -c Release -r win-x64`. Running `dotnet publish` from the solution root publishes managed only.
 - **PowerShell `&&`**: not a valid statement separator — use two separate commands.
+- **BgMoveGen DLL setup**: after cloning, publish to `native/`: `dotnet publish BgMoveGen/BgMoveGen.csproj -c Release -r win-x64 -o "{repo}/BgRLEngine/BgRLEngine/native"`. Must publish explicitly from the BgMoveGen project — solution-level publish is managed only. `native/` is gitignored — never commit the DLL.
+- **BgMoveGen version**: `REQUIRED_MOVEGEN_VERSION` in `movegen.py` must match BgMoveGen's `get_version()` return value. Bump both sides together on any breaking change. Current version: 100.
 
 ## Design rationale (for future sessions)
 - **SPRT over fixed-sample test**: SPRT naturally balances error rates against compute cost. Strong checkpoints promote in ~150 games; borderline ones spend ~1000 games in the indifference zone; clearly weak ones reject fast. Fixed-sample wastes games on obvious cases.
@@ -196,18 +196,17 @@ All variants use identical rules (hitting, bar re-entry, bearing off). Only star
 - Long training runs for remaining configs pending
 
 ## Training results
-| Config | Variant  | Games   | Time   | Rate       | Level ceiling |
-|--------|----------|---------|--------|------------|---------------|
-| DMP    | Standard | 225,000 | 2.5 hr | 25.4 g/s   | 4             |
+| Config | Variant   | Games   | Time   | Rate     | Level ceiling |
+|--------|-----------|---------|--------|----------|---------------|
+| DMP    | Standard  | 225,000 | 2.5 hr | 25.4 g/s | 4             |
+| DMP    | Nackgammon| 1,000   | smoke  | 21.6 g/s | —             |
+| DMP    | Bg960     | 1,000   | smoke  | 23.7 g/s | —             |
 
 ## Deferred
 - Config-specific promotion metrics (match win rate, equity error, gammon rate)
 - Current 75% per-game threshold unreachable at higher levels due to dice variance
-- Match-based metric: best-of-N win rate to filter luck
-- C# move generation integration complete — next: multi-core parallelization of self-play
-- Bg960 starting positions (BgMoveGen deferred)
 - Best-of-3 series promotion metric — design questions settled, ready to implement
-- add "Bg960 via BgMoveGen — plan settled, C# work needed
+- Multi-core parallelization of self-play
 
 ## Source files
 All source is in the repo. Key files for reference:
