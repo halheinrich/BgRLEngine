@@ -5,4 +5,5 @@ __pycache__/
 .vs/
 *.user
 output/
-{engine,training,utils,configs,tests}/
+profile.txt
+*.txt
