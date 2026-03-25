@@ -18,10 +18,8 @@ Device strategy:
   parallelism in the backward pass across the game's state sequence)
 - Frozen opponent checkpoints always stay on CPU
 """
-
 from __future__ import annotations
 
-import math
 import time
 import numpy as np
 import torch
@@ -30,28 +28,27 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
-from engine.state import BoardState, encode_board, BOARD_FEATURE_SIZE
+from engine.state import BOARD_FEATURE_SIZE
 from engine.network import TDNetwork, NUM_OUTPUTS, compute_equity
 from engine.game import play_game, GameRecord, GameResult
-from engine.setup_generator import SetupGenerator
+from engine.movegen import get_starting_position, Variant
 from utils.sprt import SPRTResult, sprt_test
-
 
 @dataclass
 class TrainingStats:
     """Accumulated training statistics."""
-    games_played: int = 0
-    total_moves: int = 0
-    current_level: int = 0
-    levels_reached: int = 0
-    best_win_rate: float = 0.0
-    sprt_tests_run: int = 0
-    sprt_tests_passed: int = 0
-    sprt_tests_failed: int = 0
-    games_since_level_up: int = 0
-    training_start_time: float = 0.0
-    rolling_win_rate: float = 0.5
-    rolling_eval_history: list[float] = field(default_factory=list)
+    games_played:          int   = 0
+    total_moves:           int   = 0
+    current_level:         int   = 0
+    levels_reached:        int   = 0
+    best_win_rate:         float = 0.0
+    sprt_tests_run:        int   = 0
+    sprt_tests_passed:     int   = 0
+    sprt_tests_failed:     int   = 0
+    games_since_level_up:  int   = 0
+    training_start_time:   float = 0.0
+    rolling_win_rate:      float = 0.5
+    rolling_eval_history:  list[float] = field(default_factory=list)
 
 
 def result_to_target(result: GameResult) -> np.ndarray:
@@ -68,11 +65,11 @@ def result_to_target(result: GameResult) -> np.ndarray:
     """
     target = np.zeros(NUM_OUTPUTS, dtype=np.float32)
     mapping = {
-        GameResult.WIN: 0,
-        GameResult.WIN_GAMMON: 1,
-        GameResult.WIN_BACKGAMMON: 2,
-        GameResult.LOSE: 3,
-        GameResult.LOSE_GAMMON: 4,
+        GameResult.WIN:             0,
+        GameResult.WIN_GAMMON:      1,
+        GameResult.WIN_BACKGAMMON:  2,
+        GameResult.LOSE:            3,
+        GameResult.LOSE_GAMMON:     4,
         GameResult.LOSE_BACKGAMMON: 5,
     }
     if result in mapping:
@@ -81,11 +78,11 @@ def result_to_target(result: GameResult) -> np.ndarray:
 
 
 def td_lambda_update(
-    network: TDNetwork,
+    network:   TDNetwork,
     optimizer: torch.optim.Optimizer,
-    record: GameRecord,
+    record:    GameRecord,
     td_lambda: float,
-    device: torch.device,
+    device:    torch.device,
 ) -> float:
     """Perform TD(λ) weight update from a completed game.
 
@@ -96,11 +93,11 @@ def td_lambda_update(
     Batched: computes targets in one pass, then one forward+backward step.
 
     Args:
-        network: the network to update (should be on `device`).
+        network:   the network to update (should be on `device`).
         optimizer: the optimizer.
-        record: completed game record.
+        record:    completed game record.
         td_lambda: the λ parameter (0 = TD(0), 1 = Monte Carlo).
-        device: torch device for training.
+        device:    torch device for training.
 
     Returns:
         Loss value for monitoring.
@@ -109,32 +106,30 @@ def td_lambda_update(
         return 0.0
 
     # Stack all states into a single batch
-    states_np = np.stack(record.states)
+    states_np    = np.stack(record.states)
     states_batch = torch.from_numpy(states_np).to(device)
 
     # Phase 1: compute TD(λ) targets (no gradients)
     with torch.no_grad():
         all_predictions = network(states_batch)  # shape: (T, 6)
 
-    # Final target from game outcome (same perspective as all states)
-    final_target = torch.from_numpy(
-        result_to_target(record.result)
-    ).to(device)
+        # Final target from game outcome
+        final_target = torch.from_numpy(
+            result_to_target(record.result)
+        ).to(device)
 
-    # Build targets backward: target_t = (1-λ)*V(s_{t+1}) + λ*target_{t+1}
-    T = len(record.states)
-    targets = torch.zeros_like(all_predictions)
-    targets[-1] = final_target
-
-    for t in range(T - 2, -1, -1):
-        next_pred = all_predictions[t + 1]
-        targets[t] = (1 - td_lambda) * next_pred + td_lambda * targets[t + 1]
+        # Build targets backward: target_t = (1-λ)*V(s_{t+1}) + λ*target_{t+1}
+        T       = len(record.states)
+        targets = torch.zeros_like(all_predictions)
+        targets[-1] = final_target
+        for t in range(T - 2, -1, -1):
+            next_pred  = all_predictions[t + 1]
+            targets[t] = (1 - td_lambda) * next_pred + td_lambda * targets[t + 1]
 
     # Phase 2: single forward pass with gradients + one optimizer step
     network.train()
     predictions = network(states_batch)
-    loss = nn.functional.mse_loss(predictions, targets)
-
+    loss        = nn.functional.mse_loss(predictions, targets)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -143,13 +138,13 @@ def td_lambda_update(
 
 
 def evaluate_against(
-    network: TDNetwork,
-    opponent: TDNetwork,
-    device: torch.device,
-    num_games: int,
-    setup_generator: Optional[SetupGenerator] = None,
-    rng: Optional[np.random.Generator] = None,
-    equity_weights: Optional[torch.Tensor] = None,
+    network:        TDNetwork,
+    opponent:       TDNetwork,
+    device:         torch.device,
+    num_games:      int,
+    variant:        Variant                      = Variant.STANDARD,
+    rng:            Optional[np.random.Generator] = None,
+    equity_weights: Optional[torch.Tensor]        = None,
 ) -> float:
     """Evaluate a network against an opponent.
 
@@ -158,12 +153,12 @@ def evaluate_against(
     the win rate of the primary network.
 
     Args:
-        network: the network to evaluate.
-        opponent: the opponent network.
-        device: torch device (CPU for evaluation).
-        num_games: number of games to play.
-        setup_generator: optional setup generator for starting positions.
-        rng: random number generator.
+        network:        the network to evaluate.
+        opponent:       the opponent network.
+        device:         torch device (CPU for evaluation).
+        num_games:      number of games to play.
+        variant:        game variant for starting positions.
+        rng:            random number generator.
         equity_weights: optional equity weights for move selection.
 
     Returns:
@@ -176,15 +171,9 @@ def evaluate_against(
     opponent.eval()
 
     wins = 0
-
     for i in range(num_games):
-        # Alternate starting positions
-        if setup_generator is not None:
-            start = setup_generator.generate()
-        else:
-            start = BoardState.standard_setup()
+        start = get_starting_position(variant)
 
-        # Alternate who goes first
         if i % 2 == 0:
             # network plays as initial player
             record = play_game(
@@ -224,26 +213,26 @@ class Trainer:
     - Frozen opponents always stay on play_device
 
     Args:
-        config: training configuration dictionary.
-        device: torch device for training (GPU if available).
+        config:     training configuration dictionary.
+        device:     torch device for training (GPU if available).
         output_dir: directory for saving checkpoints and logs.
     """
 
     def __init__(
         self,
-        config: dict,
-        device: torch.device,
+        config:     dict,
+        device:     torch.device,
         output_dir: Path,
     ) -> None:
-        self.config = config
+        self.config       = config
         self.train_device = device
-        self.play_device = torch.device("cpu")
-        self.output_dir = output_dir
+        self.play_device  = torch.device("cpu")
+        self.output_dir   = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Network — starts on CPU for initial self-play
-        net_config = config.get("network", {})
-        self.network = TDNetwork(
+        net_config    = config.get("network", {})
+        self.network  = TDNetwork(
             input_size=BOARD_FEATURE_SIZE,
             hidden_layers=net_config.get("hidden_layers", [256, 256]),
             dropout=net_config.get("dropout", 0.0),
@@ -251,15 +240,13 @@ class Trainer:
 
         # Optimizer
         train_config = config.get("training", {})
-        self.lr = train_config.get("learning_rate", 0.0001)
+        self.lr      = train_config.get("learning_rate", 0.0001)
         self.optimizer = torch.optim.Adam(
             self.network.parameters(),
             lr=self.lr,
         )
 
         # For small networks, CPU is faster than GPU due to transfer overhead.
-        # The per-game CPU↔GPU round trip costs more than the backprop saves.
-        # Stay on CPU unless the network is large enough to benefit from GPU.
         param_count = sum(p.numel() for p in self.network.parameters())
         if self.train_device.type == "cuda" and param_count < 1_000_000:
             print(f"Network has {param_count:,} parameters — using CPU for all computation")
@@ -267,54 +254,46 @@ class Trainer:
             self.train_device = self.play_device
 
         # TD parameters
-        self.td_lambda = train_config.get("td_lambda", 0.7)
-        self.epsilon_start = train_config.get("epsilon_start", 0.10)
-        self.epsilon_end = train_config.get("epsilon_end", 0.01)
+        self.td_lambda           = train_config.get("td_lambda", 0.7)
+        self.epsilon_start       = train_config.get("epsilon_start", 0.10)
+        self.epsilon_end         = train_config.get("epsilon_end", 0.01)
         self.epsilon_decay_games = train_config.get("epsilon_decay_games", 200000)
 
-        # Equity weights for move selection
+        # Equity weights
         ew = train_config.get("equity_weights", [1, 2, 3, -1, -2, -3])
         self.equity_weights = torch.tensor(ew, dtype=torch.float32)
         print(f"Equity weights: {ew}")
 
         # Evaluation parameters
-        eval_config = config.get("evaluation", {})
-        self.eval_cadence = eval_config.get("cadence_games", 5000)
+        eval_config          = config.get("evaluation", {})
+        self.eval_cadence    = eval_config.get("cadence_games", 5000)
         self.eval_match_size = eval_config.get("eval_match_size", 100)
 
         # SPRT parameters
-        sprt_config = config.get("sprt", {})
-        self.sprt_p0 = sprt_config.get("p0", 0.70)
-        self.sprt_p1 = sprt_config.get("p1", 0.76)
-        self.sprt_alpha = sprt_config.get("alpha", 0.05)
-        self.sprt_beta = sprt_config.get("beta", 0.10)
+        sprt_config       = config.get("sprt", {})
+        self.sprt_p0      = sprt_config.get("p0", 0.70)
+        self.sprt_p1      = sprt_config.get("p1", 0.76)
+        self.sprt_alpha   = sprt_config.get("alpha", 0.05)
+        self.sprt_beta    = sprt_config.get("beta", 0.10)
         self.sprt_hard_cap = sprt_config.get("hard_cap", 2000)
-        self.sprt_gate = sprt_config.get("gate_threshold", 0.70)
+        self.sprt_gate    = sprt_config.get("gate_threshold", 0.70)
 
         # Plateau parameters
-        plateau_config = config.get("plateau", {})
-        self.plateau_base_budget = plateau_config.get("base_budget", 500000)
-        self.plateau_budget_scale = plateau_config.get("budget_scale", 1.5)
-        self.staleness_window = plateau_config.get("staleness_window", 200000)
-        self.staleness_min_improvement = plateau_config.get(
-            "staleness_min_improvement", 0.02
-        )
-        self.max_failed_sprts = plateau_config.get("max_failed_sprts", 3)
+        plateau_config                 = config.get("plateau", {})
+        self.plateau_base_budget       = plateau_config.get("base_budget", 500000)
+        self.plateau_budget_scale      = plateau_config.get("budget_scale", 1.5)
+        self.staleness_window          = plateau_config.get("staleness_window", 200000)
+        self.staleness_min_improvement = plateau_config.get("staleness_min_improvement", 0.02)
+        self.max_failed_sprts          = plateau_config.get("max_failed_sprts", 3)
 
-        # Setup generator
-        setup_config = config.get("setup_generator", {})
-        self.setup_generator = SetupGenerator(
-            min_checkers_per_point=setup_config.get("min_checkers_per_point", 2),
-            min_points_per_quadrant=setup_config.get("min_points_per_quadrant", 1),
-            min_pip_count=setup_config.get("min_pip_count", 100),
-            checkers_per_player=setup_config.get("checkers_per_player", 15),
-            made_point_weights=setup_config.get("made_point_weights"),
-        )
+        # Variant for starting positions
+        variant_str  = config.get("movegen", {}).get("variant", "standard")
+        self.variant = Variant[variant_str.upper()]
 
         # Level tracking
-        self.level_opponents: list[TDNetwork] = []  # frozen checkpoints, always on CPU
+        self.level_opponents: list[TDNetwork] = []
         self.stats = TrainingStats()
-        self.rng = np.random.default_rng(config.get("seed"))
+        self.rng   = np.random.default_rng(config.get("seed"))
         self._failed_sprts_this_level = 0
 
     def _to_play(self) -> None:
@@ -334,29 +313,27 @@ class Trainer:
 
     def _current_budget(self) -> int:
         """Compute the plateau budget for the current level."""
-        level = self.stats.current_level
+        level  = self.stats.current_level
         budget = int(self.plateau_base_budget * (self.plateau_budget_scale ** level))
         return budget
 
     def _check_staleness(self) -> bool:
-        """Check if training has stalled (staleness signal).
+        """Check if training has stalled.
 
-        Returns True if the improvement in rolling win rate over the
+        Returns True if improvement in rolling win rate over the
         staleness window is below the threshold.
         """
         history = self.stats.rolling_eval_history
         if len(history) < 2:
             return False
 
-        # Check if there's been sufficient improvement in the window
         window_evals = int(self.staleness_window / self.eval_cadence)
         if len(history) < window_evals:
             return False
 
-        recent = history[-1]
-        old = history[-window_evals]
+        recent      = history[-1]
+        old         = history[-window_evals]
         improvement = recent - old
-
         return improvement < self.staleness_min_improvement
 
     def _freeze_checkpoint(self) -> TDNetwork:
@@ -367,7 +344,6 @@ class Trainer:
                 "hidden_layers", [256, 256]
             ),
         ).to(self.play_device)
-        # Copy weights (handle case where network might be on GPU)
         state_dict = {k: v.cpu() for k, v in self.network.state_dict().items()}
         checkpoint.load_state_dict(state_dict)
         checkpoint.eval()
@@ -375,15 +351,14 @@ class Trainer:
 
     def _save_checkpoint(self, label: str) -> Path:
         """Save the current network to disk."""
-        path = self.output_dir / f"checkpoint_{label}.pt"
-        # Always save CPU state dict for portability
+        path       = self.output_dir / f"checkpoint_{label}.pt"
         state_dict = {k: v.cpu() for k, v in self.network.state_dict().items()}
         torch.save({
-            "model_state_dict": state_dict,
+            "model_state_dict":     state_dict,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "stats": {
-                "games_played": self.stats.games_played,
-                "current_level": self.stats.current_level,
+                "games_played":   self.stats.games_played,
+                "current_level":  self.stats.current_level,
                 "levels_reached": self.stats.levels_reached,
             },
         }, path)
@@ -392,22 +367,20 @@ class Trainer:
     def _run_sprt(self) -> bool:
         """Run the SPRT promotion test against the current level opponent.
 
-        Network must be on CPU before calling. Returns True if the test
-        accepts (promote).
+        Network must be on CPU before calling.
+        Returns True if the test accepts (promote).
         """
         if not self.level_opponents:
-            # No opponent yet — auto-promote to level 1
             return True
 
         opponent = self.level_opponents[-1]
-        wins = 0
-        games = 0
+        wins     = 0
+        games    = 0
 
         self.network.eval()
-
         while True:
-            # Play one evaluation game, alternating sides
-            start = self.setup_generator.generate()
+            start = get_starting_position(self.variant)
+
             if games % 2 == 0:
                 record = play_game(
                     self.network, self.play_device,
@@ -427,18 +400,16 @@ class Trainer:
                     equity_weights=self.equity_weights,
                 )
                 if record.result.value < 0:
-                    wins += 1  # opponent lost = our network wins
+                    wins += 1
 
             games += 1
 
-            # Run SPRT test
             result = sprt_test(
                 wins, games,
                 self.sprt_p0, self.sprt_p1,
                 self.sprt_alpha, self.sprt_beta,
                 self.sprt_hard_cap,
             )
-
             if result == SPRTResult.ACCEPT:
                 self.stats.sprt_tests_passed += 1
                 return True
@@ -446,7 +417,6 @@ class Trainer:
                 self.stats.sprt_tests_failed += 1
                 return False
 
-        # Should not reach here, but just in case
         return False
 
     def train(self, max_games: Optional[int] = None) -> TrainingStats:
@@ -465,12 +435,11 @@ class Trainer:
         """
         self.stats.training_start_time = time.time()
 
-        using_gpu = self.train_device.type == "cuda"
         print(f"Training: self-play on CPU, backprop on {self.train_device}")
         print(f"Network: {sum(p.numel() for p in self.network.parameters())} parameters")
 
         while True:
-            # Check termination conditions
+            # Termination conditions
             if max_games and self.stats.games_played >= max_games:
                 print(f"Reached max games ({max_games})")
                 break
@@ -487,8 +456,10 @@ class Trainer:
             # 1. Self-play on CPU
             self._to_play()
             epsilon = self._current_epsilon()
-            start = self.setup_generator.generate()
-
+            start   = get_starting_position(
+                self.variant,
+                seed=int(self.rng.integers(0, 2**31)),
+            )
             self.network.eval()
             record = play_game(
                 self.network, self.play_device,
@@ -497,18 +468,18 @@ class Trainer:
                 equity_weights=self.equity_weights,
             )
 
-            # 2. TD(λ) update on train device (GPU if available)
+            # 2. TD(λ) update on train device
             self._to_train()
             loss = td_lambda_update(
                 self.network, self.optimizer, record,
                 self.td_lambda, self.train_device,
             )
 
-            self.stats.games_played += 1
+            self.stats.games_played         += 1
             self.stats.games_since_level_up += 1
-            self.stats.total_moves += record.num_moves
+            self.stats.total_moves          += record.num_moves
 
-            # 3. Periodic evaluation (on CPU)
+            # 3. Periodic evaluation
             if self.stats.games_played % self.eval_cadence == 0:
                 self._to_play()
                 self._periodic_eval()
@@ -516,7 +487,7 @@ class Trainer:
             # Progress reporting
             if self.stats.games_played % 1000 == 0:
                 elapsed = time.time() - self.stats.training_start_time
-                rate = self.stats.games_played / elapsed
+                rate    = self.stats.games_played / elapsed
                 print(
                     f"Games: {self.stats.games_played:,} | "
                     f"Level: {self.stats.current_level} | "
@@ -547,40 +518,32 @@ class Trainer:
         Network must be on CPU before calling.
         """
         if not self.level_opponents:
-            # No opponent yet — evaluate against random play baseline
-            # and auto-promote if reasonable
             win_rate = self._eval_vs_random()
             self.stats.rolling_win_rate = win_rate
             self.stats.rolling_eval_history.append(win_rate)
-
             if win_rate > self.sprt_gate:
                 print(f"  Level 0→1 gate reached (win rate vs random: {win_rate:.3f})")
                 self._promote()
             return
 
-        # Evaluate against current level opponent
         opponent = self.level_opponents[-1]
         win_rate = evaluate_against(
             self.network, opponent, self.play_device,
-            self.eval_match_size, self.setup_generator, self.rng,
+            self.eval_match_size, self.variant, self.rng,
             equity_weights=self.equity_weights,
         )
         self.stats.rolling_win_rate = win_rate
         self.stats.rolling_eval_history.append(win_rate)
 
-        # Check SPRT gate
         if win_rate >= self.sprt_gate:
             print(f"  SPRT gate reached (win rate: {win_rate:.3f}), running test...")
             self.stats.sprt_tests_run += 1
-
             if self._run_sprt():
                 print(f"  ✓ SPRT passed! Promoting to level {self.stats.current_level + 1}")
                 self._promote()
             else:
                 self._failed_sprts_this_level += 1
                 print(f"  ✗ SPRT failed ({self._failed_sprts_this_level}/{self.max_failed_sprts})")
-
-                # Check for failed SPRT budget reduction
                 if self._failed_sprts_this_level >= self.max_failed_sprts:
                     remaining = self._current_budget() - self.stats.games_since_level_up
                     self.stats.games_since_level_up += remaining // 2
@@ -588,17 +551,13 @@ class Trainer:
 
     def _promote(self) -> None:
         """Promote to the next level."""
-        # Freeze current network as the level opponent (always on CPU)
         checkpoint = self._freeze_checkpoint()
         self.level_opponents.append(checkpoint)
-
-        self.stats.current_level += 1
-        self.stats.games_since_level_up = 0
+        self.stats.current_level        += 1
+        self.stats.games_since_level_up  = 0
         self.stats.rolling_eval_history.clear()
-        self.stats.rolling_win_rate = 0.5  # reset display to neutral
-        self._failed_sprts_this_level = 0
-
-        # Save checkpoint
+        self.stats.rolling_win_rate      = 0.5
+        self._failed_sprts_this_level    = 0
         self._save_checkpoint(f"level{self.stats.current_level}")
         print(f"  Saved level {self.stats.current_level} checkpoint")
 
@@ -607,12 +566,10 @@ class Trainer:
 
         Network must be on CPU before calling.
         """
-        # Create a freshly initialized network as "random" opponent
         random_net = TDNetwork(input_size=BOARD_FEATURE_SIZE).to(self.play_device)
         random_net.eval()
-
         return evaluate_against(
             self.network, random_net, self.play_device,
-            self.eval_match_size, self.setup_generator, self.rng,
+            self.eval_match_size, self.variant, self.rng,
             equity_weights=self.equity_weights,
         )

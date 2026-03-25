@@ -1,52 +1,43 @@
 # BgRLEngine training configuration
 
+movegen:
+  dll_path: D:/Users/Hal/Documents/Visual Studio 2026/Projects/backgammon/BgMoveGen/BgMoveGen/bin/Release/net10.0/win-x64/publish/BgMoveGen.dll
+  variant:  standard
+
 network:
-  hidden_layers: [256, 256]       # 2 hidden layers, 256 units each
-  activation: relu                # relu for hidden layers; output is always sigmoid
-  dropout: 0.0                    # dropout rate (0 = disabled)
+  hidden_layers: [256, 256]  # 2 hidden layers, 256 units each
+  activation:    relu        # relu for hidden layers; output is always sigmoid
+  dropout:       0.0         # dropout rate (0 = disabled)
 
 training:
-  td_lambda: 0.7                  # TD(λ) parameter
-  learning_rate: 0.0001           # Adam learning rate
-  epsilon_start: 0.10             # ε-greedy start value
-  epsilon_end: 0.01               # ε-greedy final value
-  epsilon_decay_games: 200000     # games over which ε decays linearly
+  td_lambda:            0.7      # TD(λ) parameter
+  learning_rate:        0.0001   # Adam learning rate
+  epsilon_start:        0.10     # ε-greedy start value
+  epsilon_end:          0.01     # ε-greedy final value
+  epsilon_decay_games:  200000   # games over which ε decays linearly
   equity_weights: [1, 2, 3, -1, -2, -3]  # money play (default)
-  # equity_weights: [1, 1, 1, -1, -1, -1]  # DMP (1a1a)
-  # equity_weights: [1, 1, 1, -1, -2, -2]  # gammon-avoiding: leader 1a2aC (win=match, gammon/bg loss both lose match)
-  # equity_weights: [1, 2, 2, -1, -1, -1]  # gammon-seeking: trailer 2a1aC (gammon/bg win both win match, any loss = 1pt)
+  # equity_weights: [1, 1, 1, -1, -1, -1]      # DMP (1a1a)
+  # equity_weights: [1, 1, 1, -1, -2, -2]      # gammon-avoiding
+  # equity_weights: [1, 2, 2, -1, -1, -1]      # gammon-seeking
 
 evaluation:
-  cadence_games: 1000             # evaluate every N training games
-  eval_match_size: 100            # games per evaluation match
+  cadence_games:   1000   # evaluate every N training games
+  eval_match_size: 100    # games per evaluation match
 
 sprt:
-  p0: 0.70                        # H₀ boundary (not ready)
-  p1: 0.76                        # H₁ boundary (ready to promote)
-  alpha: 0.05                     # false promotion rate
-  beta: 0.10                      # missed promotion rate
-  hard_cap: 2000                  # max games before forced reject
-  gate_threshold: 0.70            # rolling win rate to trigger SPRT
+  p0:             0.70    # H₀ boundary (not ready)
+  p1:             0.76    # H₁ boundary (ready to promote)
+  alpha:          0.05    # false promotion rate
+  beta:           0.10    # missed promotion rate
+  hard_cap:       2000    # max games before forced reject
+  gate_threshold: 0.70    # rolling win rate to trigger SPRT
 
 plateau:
-  base_budget: 500000             # base games budget for level 0→1
-  budget_scale: 1.5               # multiply budget by this per level
-  staleness_window: 200000        # game window for staleness check
-  staleness_min_improvement: 0.02 # minimum win rate improvement in window
-  max_failed_sprts: 3             # failed SPRTs before halving remaining budget
+  base_budget:              500000  # base games budget for level 0→1
+  budget_scale:             1.5     # multiply budget by this per level
+  staleness_window:         200000  # game window for staleness check
+  staleness_min_improvement: 0.02   # minimum win rate improvement in window
+  max_failed_sprts:         3       # failed SPRTs before halving remaining budget
 
-setup_generator:
-  min_checkers_per_point: 2       # minimum checkers on any occupied point
-  min_points_per_quadrant: 1      # minimum occupied points per quadrant
-  min_pip_count: 100              # minimum total pip count
-  checkers_per_player: 15         # standard checker count
-  made_point_weights:             # sampling weights by number of made points
-    2: 1
-    3: 3
-    4: 10
-    5: 10
-    6: 5
-    7: 2
-
-device: auto                      # auto, cpu, or cuda
-seed: null                        # random seed (null = random)
+device: auto   # auto | cpu | cuda
+seed:   null   # random seed (null = random)

@@ -3,15 +3,13 @@
 Usage:
     python -m bgrle.main [--config CONFIG_PATH] [--max-games N] [--output-dir DIR]
 """
-
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
-import yaml
 import torch
+import yaml
 
 
 def get_device(config_device: str = "auto") -> torch.device:
@@ -25,9 +23,9 @@ def get_device(config_device: str = "auto") -> torch.device:
     """
     if config_device == "auto":
         if torch.cuda.is_available():
-            device = torch.device("cuda")
+            device   = torch.device("cuda")
             gpu_name = torch.cuda.get_device_name(0)
-            vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            vram     = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             print(f"Using CUDA: {gpu_name} ({vram:.1f} GB VRAM)")
         else:
             device = torch.device("cpu")
@@ -35,7 +33,6 @@ def get_device(config_device: str = "auto") -> torch.device:
     else:
         device = torch.device(config_device)
         print(f"Using device: {device}")
-
     return device
 
 
@@ -76,21 +73,29 @@ def main() -> None:
         print(f"Config not found at {config_path}, using defaults")
         config = {}
 
-    # Setup
-    device = get_device(config.get("device", "auto"))
-    output_dir = Path(args.output_dir)
+    # Load BgMoveGen
+    from engine.movegen import load_movegen
+    movegen_cfg = config.get("movegen", {})
+    dll_path    = movegen_cfg.get("dll_path")
+    if not dll_path:
+        raise RuntimeError("movegen.dll_path must be set in config")
+    load_movegen(dll_path)
+    print(f"Loaded BgMoveGen from {dll_path}")
 
-    # Set random seed if specified
+    # Device
+    device = get_device(config.get("device", "auto"))
+
+    # Random seed
     seed = config.get("seed")
     if seed is not None:
         torch.manual_seed(seed)
         print(f"Random seed: {seed}")
 
-    # Import here to avoid circular imports
+    # Train
     from training.td_trainer import Trainer
-
-    trainer = Trainer(config, device, output_dir)
-    stats = trainer.train(max_games=args.max_games)
+    output_dir = Path(args.output_dir)
+    trainer    = Trainer(config, device, output_dir)
+    stats      = trainer.train(max_games=args.max_games)
 
     print(f"\nFinal skill score: Level {stats.levels_reached}")
 
