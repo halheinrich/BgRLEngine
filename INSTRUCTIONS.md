@@ -96,6 +96,38 @@ All variants use identical rules (hitting, bar re-entry, bearing off). Only star
 
 ---
 
+## Ecosystem architecture
+
+### Sub-projects
+- **BgMoveGen** — move generation, starting positions (C#, NativeAOT, exists)
+- **BgRLEngine** — specialist NN training (Python/PyTorch, exists)
+- **BgPositionRouter** — position classification, routing, race lookup tables (C#)
+- **BgInference** — full backgammon decisions: move + cube (C#, consumes all others)
+
+### BgRLEngine specialist NNs (training targets)
+- General (current)
+- Race
+- No-gammon contact (both sides have checkers off)
+- Blitz
+- Back game
+- Prime vs prime
+- Others TBD
+
+### Dependency chain
+```
+BgMoveGen ──────────────────────────────┐
+BgRLEngine → ONNX models ───────────────┤
+BgPositionRouter (lookup + routing) ────┤→ BgInference → decisions
+```
+
+### Position routing (BgPositionRouter)
+- Decision tree — heuristic rules first, learned classifier deferred
+- Race boundary: zero contact (existing `is_race()` rule)
+- Other boundaries: TBD per sub-engine
+- Lookup tables for race equity (short races, exact answers)
+- Falls through to appropriate ONNX model for everything else
+- Starting positions: BgMoveGen (not BgPositionRouter's concern)
+
 ## Bg960 setup constraints
 - Symmetrical (opponent mirrors player)
 - No checkers on bar or borne off at start
@@ -209,6 +241,7 @@ All variants use identical rules (hitting, bar re-entry, bearing off). Only star
 - Current 75% per-game threshold unreachable at higher levels due to dice variance
 - Best-of-3 series promotion metric — design questions settled, ready to implement
 - Multi-core parallelization of self-play
+- ONNX export of trained models — required by BgInference
 
 ## Source files
 All source is in the repo. Key files for reference:
