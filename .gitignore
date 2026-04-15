@@ -8,3 +8,4 @@ output/
 profile.txt
 *.txt
 BgRLEngine/native/
+.claude/
