@@ -10,7 +10,6 @@ from engine.state import (
     encode_borne_off, flip_perspective,
     BOARD_FEATURE_SIZE, NUM_POINTS, UNITS_PER_POINT,
 )
-from engine.setup_generator import SetupGenerator, QUADRANTS
 from engine.dice import roll_dice, generate_plays, get_dice_to_use
 from engine.network import TDNetwork, compute_equity, NUM_OUTPUTS
 from training.td_trainer import sprt_test, SPRTResult, result_to_target
@@ -167,63 +166,6 @@ class TestFlipPerspective:
         np.testing.assert_array_equal(state.points, double_flipped.points)
         assert state.bar_player == double_flipped.bar_player
         assert state.bar_opponent == double_flipped.bar_opponent
-
-
-# ── Setup generator tests ──────────────────────────────────────────
-
-class TestSetupGenerator:
-    def setup_method(self):
-        self.gen = SetupGenerator(rng=np.random.default_rng(42))
-
-    def test_generates_valid_position(self):
-        state = self.gen.generate()
-        player = sum(max(0, state.points[i]) for i in range(24))
-        assert player == 15
-
-    def test_symmetry(self):
-        state = self.gen.generate()
-        for i in range(24):
-            mirror = 23 - i
-            player_here = max(0, state.points[i])
-            opp_mirror = abs(min(0, state.points[mirror]))
-            assert player_here == opp_mirror, (
-                f"Asymmetry at point {i}: player={player_here}, "
-                f"opponent at mirror {mirror}={opp_mirror}"
-            )
-
-    def test_min_checkers_per_point(self):
-        for _ in range(50):
-            state = self.gen.generate()
-            for i in range(24):
-                if state.points[i] > 0:
-                    assert state.points[i] >= 2
-
-    def test_quadrant_coverage(self):
-        for _ in range(50):
-            state = self.gen.generate()
-            for q in QUADRANTS:
-                has_checker = any(state.points[i] > 0 for i in q)
-                assert has_checker, f"Quadrant {list(q)} has no player checkers"
-
-    def test_min_pip_count(self):
-        for _ in range(50):
-            state = self.gen.generate()
-            pips = state.player_pip_count()
-            assert pips >= 100
-
-    def test_standard_is_valid(self):
-        state = self.gen.standard()
-        assert sum(max(0, state.points[i]) for i in range(24)) == 15
-
-    def test_batch_generation(self):
-        batch = self.gen.generate_batch(10)
-        assert len(batch) == 10
-
-    def test_weight_update(self):
-        self.gen.set_weights({4: 1, 5: 1, 6: 1, 7: 1})
-        state = self.gen.generate()
-        player = sum(max(0, state.points[i]) for i in range(24))
-        assert player == 15
 
 
 # ── Dice and move generation tests ─────────────────────────────────

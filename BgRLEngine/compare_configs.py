@@ -20,7 +20,7 @@ from pathlib import Path
 from engine.state import BoardState, encode_board, flip_perspective, BOARD_FEATURE_SIZE
 from engine.network import TDNetwork, compute_equity
 from engine.dice import generate_plays, roll_dice, _apply_move
-from engine.setup_generator import SetupGenerator
+from engine.movegen import get_starting_position, Variant
 from engine.game import _apply_play
 
 
@@ -233,7 +233,6 @@ def main():
 
     print(f"\nGenerating {args.num_positions} positions...")
     rng = np.random.default_rng(args.seed)
-    gen = SetupGenerator(rng=rng)
 
     positions = []
     # Mix of Bg960, standard, and mid-game positions
@@ -241,7 +240,7 @@ def main():
         if i % 3 == 0:
             state = BoardState.standard_setup()
         elif i % 3 == 1:
-            state = gen.generate()
+            state = get_starting_position(Variant.BG960, seed=int(rng.integers(0, 2**31)))
         else:
             # Play a few random moves from standard to get mid-game positions
             state = BoardState.standard_setup()

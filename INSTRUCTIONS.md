@@ -46,7 +46,6 @@ BgRLEngine/
     │   ├── movegen.py              BgMoveGen ctypes wrapper + version check
     │   ├── network.py              TDNetwork (PyTorch), equity computation
     │   ├── game.py                 self-play game simulation
-    │   ├── setup_generator.py      Bg960 starting position generator
     │   └── dice.py                 roll_dice (training); generate_plays + helpers (tests only)
     ├── training/
     │   └── td_trainer.py           TD(λ) loop, evaluation, SPRT, plateau detection
@@ -164,7 +163,6 @@ python main.py [--config configs/<name>.yaml] [--max-games N] [--output-dir DIR]
 - **Config-specific promotion metrics.** Match win rate, equity error, gammon rate — the 75% per-game threshold is unreachable at higher levels and one metric does not fit all configs.
 - **Multi-core parallelization of self-play.** Currently single-process; training throughput is the bottleneck for higher-level runs.
 - **ONNX export of trained models.** Required by the planned BgInference consumer; not yet implemented.
-- **Eliminate `engine/setup_generator.py`.** Delete the parallel Python Bg960 generator and migrate the four callers (`compare_configs.py`, `profile_training.py`, `tests/run_tests.py`, `tests/test_core.py`) to `get_starting_position(Variant.BG960, seed=...)` so BgMoveGen is the sole starting-position source (matching the architectural invariant). Blocker: `SetupGenerator` exposes `min_checkers_per_point`, `min_points_per_quadrant`, `min_pip_count`, and `made_point_weights`; BgMoveGen's export takes only variant + seed. Migration likely requires extending the BgMoveGen export to accept distribution parameters first — coordinate via umbrella.
 - **`.pyproj` content drift.** `pyproject.toml` and `requirements.txt` are advertised in `BgRLEngine.pyproj` `<Content>` but are not present on disk. Either create them (canonical Python project metadata) or drop them from the project file.
 - **Off-tree test files.** `tests/bench_encode.py` and `tests/verify_bg960.py` exist on disk but are not listed under `<Compile>` in `BgRLEngine.pyproj`. Either add them or delete them.
 - **`main.py` docstring drift.** Docstring claims invocation via `python -m bgrle.main`, but no `bgrle` package exists; `<StartupFile>` confirms the actual entry is `python main.py`. Fix the docstring.

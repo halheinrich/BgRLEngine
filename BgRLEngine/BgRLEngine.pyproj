@@ -29,7 +29,6 @@
     <Compile Include="main.py" />
     <Compile Include="engine\__init__.py" />
     <Compile Include="engine\state.py" />
-    <Compile Include="engine\setup_generator.py" />
     <Compile Include="engine\network.py" />
     <Compile Include="engine\dice.py" />
     <Compile Include="engine\game.py" />

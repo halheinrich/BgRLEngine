@@ -5,17 +5,16 @@ import numpy as np
 from engine.network import TDNetwork
 from engine.game import play_game
 from engine.state import BoardState, BOARD_FEATURE_SIZE
-from engine.setup_generator import SetupGenerator
+from engine.movegen import get_starting_position, Variant
 from training.td_trainer import td_lambda_update
 
 dev = torch.device("cpu")
 net = TDNetwork(BOARD_FEATURE_SIZE).to(dev)
 opt = torch.optim.Adam(net.parameters(), lr=0.0001)
-gen = SetupGenerator()
 rng = np.random.default_rng(42)
 
 # Warmup
-play_game(net, dev, starting_state=gen.generate(), rng=rng)
+play_game(net, dev, starting_state=get_starting_position(Variant.BG960), rng=rng)
 
 # Profile 20 iterations
 n = 20
@@ -23,7 +22,7 @@ play_time = 0.0
 update_time = 0.0
 
 for _ in range(n):
-    start = gen.generate()
+    start = get_starting_position(Variant.BG960)
 
     t = time.perf_counter()
     net.eval()
