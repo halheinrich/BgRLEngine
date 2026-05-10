@@ -45,7 +45,6 @@
     <Content Include="configs\**\*.yaml" />
     <Content Include="pyproject.toml" />
     <Content Include="requirements.txt" />
-    <Content Include="setup_env.bat" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="engine\" />

@@ -47,7 +47,7 @@ BgRLEngine/
     │   ├── network.py              TDNetwork (PyTorch), equity computation
     │   ├── game.py                 self-play game simulation
     │   ├── setup_generator.py      Bg960 starting position generator
-    │   └── dice.py                 pure-Python move generation (tests only)
+    │   └── dice.py                 roll_dice (training); generate_plays + helpers (tests only)
     ├── training/
     │   └── td_trainer.py           TD(λ) loop, evaluation, SPRT, plateau detection
     ├── utils/
@@ -101,32 +101,51 @@ The observable surface consumed outside `td_trainer.py` is small:
 
 ```python
 # engine/state.py
-class BoardState:  # 303-feature encoding, variant-agnostic
-    def encode(self) -> np.ndarray
-# engine/state.py
-def encode_board_batch(states) -> torch.Tensor  # vectorized
+class BoardState: ...                                   # variant-agnostic position representation
+def encode_board(state: BoardState) -> np.ndarray       # 303 features
+def encode_board_batch(states) -> torch.Tensor          # vectorized
 
 # engine/movegen.py
 REQUIRED_MOVEGEN_VERSION: int = 100
-class MoveGen:  # ctypes wrapper over native BgMoveGen.dll
-    def generate_states(...); def next_move(...); def get_version() -> int
+class Variant(IntEnum): STANDARD = 0; NACKGAMMON = 1; BG960 = 2
+def load_movegen(dll_path: str | Path | None = None) -> None
+def generate_successor_states(state: BoardState,
+                              die1: int, die2: int) -> list[BoardState]
+def get_starting_position(variant: Variant | int = Variant.STANDARD,
+                          seed: int | None = None) -> BoardState
 
 # engine/network.py
 class TDNetwork(nn.Module):
-    def equity(state) -> torch.Tensor  # 6-value output
+    def forward(x: torch.Tensor) -> torch.Tensor        # (..., 6)
+    def evaluate(features: torch.Tensor) -> torch.Tensor
+def compute_equity(output: torch.Tensor,
+                   weights: torch.Tensor | None = None) -> torch.Tensor
+def compute_match_equity(output: torch.Tensor,
+                         gammon_value_win: float, gammon_value_lose: float,
+                         bg_value_win: float = 0.0,
+                         bg_value_lose: float = 0.0) -> torch.Tensor
 
 # training/td_trainer.py
-class TdTrainer:
-    def train(max_games: int | None)
-    def evaluate_against(opponent: TDNetwork) -> float
+class Trainer:
+    def train(self, max_games: int | None = None) -> TrainingStats
+def evaluate_against(network: TDNetwork, opponent: TDNetwork,
+                     device: torch.device, num_games: int,
+                     variant: Variant = Variant.STANDARD,
+                     rng: np.random.Generator | None = None,
+                     equity_weights: torch.Tensor | None = None) -> float
+
 # utils/sprt.py
-class Sprt:  # p0, p1, alpha, beta, hard_cap; returns Accept / Reject / Continue
+class SPRTResult: ...                                   # string constants: CONTINUE / ACCEPT / REJECT
+def sprt_test(wins: int, games: int,
+              p0: float = 0.70, p1: float = 0.76,
+              alpha: float = 0.05, beta: float = 0.10,
+              hard_cap: int = 2000) -> str
 ```
 
 CLI entry point:
 
 ```
-python main.py --config configs/<name>.yaml [--max-games N]
+python main.py [--config configs/<name>.yaml] [--max-games N] [--output-dir DIR]
 ```
 
 ## Pitfalls
@@ -136,7 +155,7 @@ python main.py --config configs/<name>.yaml [--max-games N]
 - **BgMoveGen version lock.** `REQUIRED_MOVEGEN_VERSION` in `engine/movegen.py` must match BgMoveGen's `get_version()` return value (currently **100**). Bump both sides together on any breaking interop change — the wrapper asserts on load.
 - **UTF-8 on Windows.** Every `open()` for config/data files must pass `encoding="utf-8"`. Default `cp1252` chokes on YAML comments containing non-ASCII.
 - **PyTorch CUDA query.** Use `torch.cuda.get_device_properties(0).total_memory` — there is no `total_mem` attribute.
-- **PowerShell + `.bat`.** From PowerShell, run `cmd /c setup_env.bat`; `.\setup_env.bat` does not work. PowerShell also rejects `&&` as a statement separator — use two separate commands.
+- **Python venv setup on Windows.** No `setup_env.bat` ships with the repo; create the venv manually with `python -m venv env`, then activate via `.\env\Scripts\Activate.ps1` (PowerShell) or `env\Scripts\activate.bat` (cmd). Windows PowerShell 5.1 rejects `&&` as a statement separator — chain with `;` or run as two commands. (PowerShell 7+ / pwsh supports `&&` and `||` like bash.)
 - **No variant flags in state encoding.** Tempting to add a one-hot "this is Nackgammon" feature when debugging variant-specific regressions; don't. Rules are identical across variants and the 303-feature encoding is load-bearing for cross-variant weight transfer.
 
 ## Subproject-internal next steps
@@ -145,3 +164,8 @@ python main.py --config configs/<name>.yaml [--max-games N]
 - **Config-specific promotion metrics.** Match win rate, equity error, gammon rate — the 75% per-game threshold is unreachable at higher levels and one metric does not fit all configs.
 - **Multi-core parallelization of self-play.** Currently single-process; training throughput is the bottleneck for higher-level runs.
 - **ONNX export of trained models.** Required by the planned BgInference consumer; not yet implemented.
+- **Eliminate `engine/setup_generator.py`.** Delete the parallel Python Bg960 generator and migrate the four callers (`compare_configs.py`, `profile_training.py`, `tests/run_tests.py`, `tests/test_core.py`) to `get_starting_position(Variant.BG960, seed=...)` so BgMoveGen is the sole starting-position source (matching the architectural invariant). Blocker: `SetupGenerator` exposes `min_checkers_per_point`, `min_points_per_quadrant`, `min_pip_count`, and `made_point_weights`; BgMoveGen's export takes only variant + seed. Migration likely requires extending the BgMoveGen export to accept distribution parameters first — coordinate via umbrella.
+- **`.pyproj` content drift.** `pyproject.toml` and `requirements.txt` are advertised in `BgRLEngine.pyproj` `<Content>` but are not present on disk. Either create them (canonical Python project metadata) or drop them from the project file.
+- **Off-tree test files.** `tests/bench_encode.py` and `tests/verify_bg960.py` exist on disk but are not listed under `<Compile>` in `BgRLEngine.pyproj`. Either add them or delete them.
+- **`main.py` docstring drift.** Docstring claims invocation via `python -m bgrle.main`, but no `bgrle` package exists; `<StartupFile>` confirms the actual entry is `python main.py`. Fix the docstring.
+- **Dead `TDNetwork.evaluate()` method.** `evaluate(features)` is defined on the network but unused — `select_play` calls `network(batch)` directly under `torch.no_grad()`. Either remove the dead surface or document a use case.
