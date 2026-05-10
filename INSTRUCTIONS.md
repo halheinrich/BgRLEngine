@@ -103,7 +103,7 @@ The observable surface consumed outside `td_trainer.py` is small:
 # engine/state.py
 class BoardState: ...                                   # variant-agnostic position representation
 def encode_board(state: BoardState) -> np.ndarray       # 303 features
-def encode_board_batch(states) -> torch.Tensor          # vectorized
+def encode_board_batch(states) -> np.ndarray            # vectorized
 
 # engine/movegen.py
 REQUIRED_MOVEGEN_VERSION: int = 100
