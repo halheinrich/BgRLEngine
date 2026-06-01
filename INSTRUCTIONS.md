@@ -1,8 +1,8 @@
 # BgRLEngine — Subproject Instructions
 
-> See [`../CLAUDE.md`](../CLAUDE.md) for session conventions.
-> See [`../INSTRUCTIONS.md`](../INSTRUCTIONS.md) for cross-cutting status and the dependency graph.
-> See [`../VISION.md`](../VISION.md) for mission and principles.
+> Collaboration contract: [`../AGENTS.md`](../AGENTS.md)
+> Umbrella status & dependency graph: [`../INSTRUCTIONS.md`](../INSTRUCTIONS.md)
+> Mission & principles: [`../VISION.md`](../VISION.md)
 
 ## Stack
 
