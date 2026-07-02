@@ -6,7 +6,7 @@
 
 ## Stack
 
-Python 3.11 / PyTorch 2.5.1+cu121 (CUDA) / Visual Studio 2026 Python workload / Windows.
+Python 3.11 / PyTorch 2.5.1+cu121 (CUDA) / ONNX opset 17 + ONNX Runtime / Visual Studio 2026 Python workload / Windows.
 
 ## Solution
 
@@ -30,7 +30,9 @@ BgRLEngine/
 ├── INSTRUCTIONS.md
 └── BgRLEngine/
     ├── BgRLEngine.pyproj
+    ├── pyproject.toml              canonical dependency record (no requirements.txt — see Pitfalls)
     ├── main.py                     entry point (CLI training driver)
+    ├── export_onnx.py              CLI: trainer checkpoint (.pt) → ONNX
     ├── compare_configs.py
     ├── profile_training.py
     ├── configs/
@@ -42,17 +44,23 @@ BgRLEngine/
     │   ├── gammon_seeking.yaml
     │   └── gammon_avoiding.yaml
     ├── engine/
-    │   ├── state.py                BoardState, 303-feature encoding
+    │   ├── state.py                BoardState, 303-feature encoding, ENCODING_VERSION
     │   ├── movegen.py              BgMoveGen ctypes wrapper + version check
     │   ├── network.py              TDNetwork (PyTorch), equity computation
+    │   ├── export.py               ONNX export + embedded metadata contract
     │   ├── game.py                 self-play game simulation
     │   └── dice.py                 roll_dice (training); generate_plays + helpers (tests only)
     ├── training/
     │   └── td_trainer.py           TD(λ) loop, evaluation, SPRT, plateau detection
     ├── utils/
     │   └── sprt.py                 standalone SPRT implementation
+    ├── parity/                     committed cross-language parity fixtures
+    │   ├── generate_vectors.py     deterministic fixture generator
+    │   ├── model.onnx              tiny parity model (committed; NOT a trained model)
+    │   └── vectors.json            golden board→features→output triples
     ├── tests/
     │   ├── test_core.py            pytest (requires torch)
+    │   ├── test_parity.py          PyTorch↔ONNX Runtime parity + fixture gate
     │   ├── run_tests.py            standalone (no torch)
     │   ├── bench_encode.py
     │   └── verify_bg960.py
@@ -94,12 +102,17 @@ The diagram is the design target; most branches are not yet trained. Phase 1 sco
 
 **Gammon classification is rule-based.** MET lookup produces Seeking / Averse / Indifferent / Balanced — the MET is solved mathematics, so asking the NN to rediscover match-equity arithmetic wastes training capacity.
 
+**ONNX export & the cross-language contract.** Trained checkpoints become consumable outside Python (BgInference, C#) via `engine/export.py`. Graph contract: input `features` float32 `[batch, input_size]` (dynamic batch), output `probabilities` float32 `[batch, 6]`, opset 17. The metadata contract is embedded in the `.onnx` file's `metadata_props` (`bgrl.*` keys — no sidecar to drift; ONNX Runtime exposes it as `ModelMetadata.CustomMetadataMap`): `bgrl.encoding_version` is the fail-fast handshake (consumer holds its own required version, mirroring the `REQUIRED_MOVEGEN_VERSION` pattern), plus structural keys and checkpoint provenance (source file, sha256, games/level). **Exported trained models are deployment artifacts, never committed** — produce them locally with `export_onnx.py`. One network per ONNX file; the portfolio-of-experts export shape (fused graph vs. router + experts) is deliberately deferred until more than the General engine exists — `bgrl.model_role` keeps exports self-describing for that future.
+
+**Parity fixtures are the encoding's cross-language SSOT mitigation.** The 303-feature encoding must be reimplemented in C# and cannot be single-sourced, so `parity/` commits the executable contract: a tiny deterministic parity model (`model.onnx`, 303→16→16→6, seeded-NumPy weights, byte-identical on regeneration — not a trained model) plus `vectors.json`, 28 golden board→features→output triples sha256-paired to the model. The consumer gate reads its tolerances from the fixture (encoding pin bit-exact, inference pin abs 1e-5). Committed here rather than the umbrella's gitignored `TestData/` so a fresh checkout fails loud, never no-ops.
+
 ## Public API
 
 The observable surface consumed outside `td_trainer.py` is small:
 
 ```python
 # engine/state.py
+ENCODING_VERSION: int = 1                               # board→feature contract version; bump on any encoding change + regenerate parity fixtures
 class BoardState: ...                                   # variant-agnostic position representation
 def encode_board(state: BoardState) -> np.ndarray       # 303 features
 def encode_board_batch(states) -> np.ndarray            # vectorized
@@ -118,6 +131,10 @@ def get_starting_position(variant: Variant | int = Variant.STANDARD,
 
 # engine/network.py
 class TDNetwork(nn.Module):
+    input_size: int                                     # read-only property
+    hidden_layers: list[int]                            # read-only property (copy)
+    @classmethod
+    def from_state_dict(cls, state_dict) -> TDNetwork   # architecture inferred from weight shapes
     def forward(x: torch.Tensor) -> torch.Tensor        # (..., 6)
     def evaluate(features: torch.Tensor) -> torch.Tensor
 def compute_equity(output: torch.Tensor,
@@ -126,6 +143,16 @@ def compute_match_equity(output: torch.Tensor,
                          gammon_value_win: float, gammon_value_lose: float,
                          bg_value_win: float = 0.0,
                          bg_value_lose: float = 0.0) -> torch.Tensor
+
+# engine/export.py
+ONNX_OPSET: int = 17
+INPUT_NAME:  str = "features"
+OUTPUT_NAME: str = "probabilities"
+def export_network(network: TDNetwork, output_path, *,
+                   model_role: str,
+                   provenance: dict[str, str] | None = None) -> dict[str, str]
+def export_checkpoint(checkpoint_path, output_path=None, *,
+                      model_role: str = "general") -> tuple[Path, dict[str, str]]
 
 # training/td_trainer.py
 class Trainer:
@@ -147,10 +174,12 @@ def sprt_test(wins: int, games: int,
               hard_cap: int = 2000) -> str
 ```
 
-CLI entry point:
+CLI entry points (run from `BgRLEngine/BgRLEngine/`):
 
 ```
 python main.py [--config configs/<name>.yaml] [--max-games N] [--output-dir DIR]
+python export_onnx.py CHECKPOINT [--output PATH] [--model-role ROLE]
+python -m parity.generate_vectors        # regenerate committed parity fixtures
 ```
 
 ## Pitfalls
@@ -162,14 +191,17 @@ python main.py [--config configs/<name>.yaml] [--max-games N] [--output-dir DIR]
 - **PyTorch CUDA memory query.** The attribute is `total_memory`, not `total_mem` — use `torch.cuda.get_device_properties(0).total_memory`.
 - **Python venv setup on Windows.** No `setup_env.bat` ships with the repo; create the venv manually with `python -m venv env`, then activate via `.\env\Scripts\Activate.ps1` (PowerShell) or `env\Scripts\activate.bat` (cmd). Windows PowerShell 5.1 rejects `&&` as a statement separator — chain with `;` or run as two commands. (PowerShell 7+ / pwsh supports `&&` and `||` like bash.)
 - **No variant flags in state encoding.** Tempting to add a one-hot "this is Nackgammon" feature when debugging variant-specific regressions; don't. Rules are identical across variants and the 303-feature encoding is load-bearing for cross-variant weight transfer.
+- **`.gitignore` excludes `*.txt` — never add a `requirements.txt`.** It would be silently invisible to version control. `pyproject.toml` is the canonical dependency record; if a new dep is installed, record it there.
+- **Encoding changes require a version bump + fixture regeneration.** Any change to the feature layout, sizes, or arithmetic in `engine/state.py` must bump `ENCODING_VERSION` and regenerate the parity fixtures (`python -m parity.generate_vectors`) in the same commit — `model.onnx` and `vectors.json` are sha256-paired and must always move together. The C# consumer's parity gate and version handshake depend on this discipline.
+- **Never commit an exported trained model.** Only `parity/model.onnx` (tiny, deterministic, contract-stable) belongs in git; trained exports are deployment artifacts identified by their embedded `bgrl.checkpoint_sha256` and regenerated locally on demand.
 
 ## Subproject-internal next steps
 
 - **Best-of-3 series promotion metric.** The single-game win-rate metric loses signal at higher curriculum levels — dice variance swamps the skill differential between consecutive levels. Design questions are settled; implementation pending.
 - **Config-specific promotion metrics.** Match win rate, equity error, gammon rate — the 75% per-game threshold is unreachable at higher levels and one metric does not fit all configs.
 - **Multi-core parallelization of self-play.** Currently single-process; training throughput is the bottleneck for higher-level runs.
-- **ONNX export of trained models.** Not yet implemented.
-- **`.pyproj` content drift.** `pyproject.toml` and `requirements.txt` are listed in `BgRLEngine.pyproj` `<Content>` but are not present on disk. Either create them (canonical Python project metadata) or drop them from the project file.
+- **Checkpoints don't self-describe their architecture.** `_save_checkpoint` stores no `hidden_layers`; loading infers the architecture from weight shapes (`TDNetwork.from_state_dict`). Works, but embedding the config in the checkpoint dict would be the durable fix — touches training code, deferred.
+- **Portfolio export shape.** One network per ONNX file today. When a second expert (race engine) exists, decide fused-graph vs. router + experts with routing consumer-side — an SSOT trade-off to weigh with evidence, not before.
 - **Test files missing from `.pyproj`.** `tests/bench_encode.py` and `tests/verify_bg960.py` exist on disk but are not listed under `<Compile>` in `BgRLEngine.pyproj`. Either add them or delete them.
 - **`main.py` docstring drift.** Docstring claims invocation via `python -m bgrle.main`, but no `bgrle` package exists; `<StartupFile>` confirms the actual entry is `python main.py`. Fix the docstring.
 - **Dead `TDNetwork.evaluate()` method.** `evaluate(features)` is defined on the network but unused — `select_play()` calls `network(batch)` directly under `torch.no_grad()`. Either remove the dead surface or document a use case.
