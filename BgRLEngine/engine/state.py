@@ -406,7 +406,10 @@ def encode_board_batch(states: list) -> np.ndarray:
     p_pips += bar_player * 25.0
     o_pips += bar_opp    * 25.0
     total_pips = p_pips + o_pips
-    pip_ratio = np.where(total_pips > 0, p_pips / total_pips, 0.5)  # (N,)
+    # Guarded divide: total_pips == 0 (everything borne off) must yield 0.5
+    # without computing 0/0 — np.where would evaluate the NaN first.
+    pip_ratio = np.full_like(total_pips, 0.5)  # (N,)
+    np.divide(p_pips, total_pips, out=pip_ratio, where=total_pips > 0)
  
     # Race detection — True if no player checker is at index >= lowest opponent checker
     # Vectorized: find highest player idx and lowest opponent idx per state

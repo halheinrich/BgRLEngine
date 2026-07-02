@@ -42,10 +42,14 @@
     <Compile Include="tests\test_core.py" />
     <Compile Include="tests\test_parity.py" />
     <Compile Include="tests\run_tests.py" />
+    <Compile Include="parity\__init__.py" />
+    <Compile Include="parity\generate_vectors.py" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="configs\**\*.yaml" />
     <Content Include="pyproject.toml" />
+    <Content Include="parity\model.onnx" />
+    <Content Include="parity\vectors.json" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="engine\" />

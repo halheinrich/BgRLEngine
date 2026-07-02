@@ -15,6 +15,7 @@ These tests catch export drift at the producer, before the C# consumer
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -32,7 +33,13 @@ from engine.export import (
     export_network,
 )
 from engine.network import NUM_OUTPUTS, TDNetwork
-from engine.state import BOARD_FEATURE_SIZE, ENCODING_VERSION
+from engine.state import (
+    BOARD_FEATURE_SIZE,
+    ENCODING_VERSION,
+    BoardState,
+    encode_board,
+    encode_board_batch,
+)
 
 # PyTorch and ONNX Runtime use different CPU kernels for the same float32
 # graph; tiny last-ulp differences are expected, real drift is not.
@@ -136,3 +143,98 @@ class TestCheckpointExport:
         )
         assert "bgrl.checkpoint_sha256" in metadata
         assert metadata["bgrl.checkpoint_file"] == self.CHECKPOINT.name
+
+
+# ── Committed parity fixtures — the cross-language contract ────────
+
+PARITY_MODEL = Path("parity/model.onnx")
+PARITY_VECTORS = Path("parity/vectors.json")
+
+
+def board_from_case(case: dict) -> BoardState:
+    """Rebuild a BoardState from a vectors.json board record."""
+    board = case["board"]
+    state = BoardState()
+    state.points = np.array(board["points"], dtype=np.int16)
+    state.bar_player = board["bar_player"]
+    state.bar_opponent = board["bar_opponent"]
+    state.off_player = board["off_player"]
+    state.off_opponent = board["off_opponent"]
+    state.player_to_move = board["player_to_move"]
+    return state
+
+
+@pytest.fixture(scope="module")
+def vectors() -> dict:
+    # No skip on absence: a missing fixture is a broken checkout and
+    # must fail the suite loudly.
+    assert PARITY_MODEL.exists(), f"committed fixture missing: {PARITY_MODEL}"
+    assert PARITY_VECTORS.exists(), f"committed fixture missing: {PARITY_VECTORS}"
+    with open(PARITY_VECTORS, encoding="utf-8") as f:
+        return json.load(f)
+
+
+class TestCommittedParityFixtures:
+    def test_model_hash_pairs_with_vectors(self, vectors):
+        actual = hashlib.sha256(PARITY_MODEL.read_bytes()).hexdigest()
+        assert actual == vectors["model_sha256"], (
+            "parity/model.onnx does not match vectors.json's model_sha256 — "
+            "the fixture pair is inconsistent; regenerate both with "
+            "python -m parity.generate_vectors"
+        )
+
+    def test_metadata_handshake(self, vectors):
+        metadata = ort_session(PARITY_MODEL).get_modelmeta().custom_metadata_map
+
+        assert vectors["encoding_version"] == ENCODING_VERSION
+        assert metadata["bgrl.encoding_version"] == str(ENCODING_VERSION)
+        assert metadata["bgrl.input_size"] == str(vectors["input_size"])
+        assert metadata["bgrl.num_outputs"] == str(vectors["num_outputs"])
+        assert metadata["bgrl.output_semantics"] == vectors["output_semantics"]
+        assert metadata["bgrl.model_role"] == "parity"
+        # The committed binary must be reproducible: no timestamp.
+        assert "bgrl.export_timestamp" not in metadata
+
+    def test_encoding_reproduces_features_bit_exact(self, vectors):
+        states = [board_from_case(c) for c in vectors["cases"]]
+        expected = np.array(
+            [c["features"] for c in vectors["cases"]], dtype=np.float32
+        )
+
+        scalar = np.stack([encode_board(s) for s in states])
+        batch = encode_board_batch(states)
+
+        assert np.array_equal(scalar, expected), (
+            "encode_board no longer reproduces the committed parity "
+            "features — if the encoding change is intentional, bump "
+            "ENCODING_VERSION and regenerate the fixtures"
+        )
+        assert np.array_equal(batch, expected)
+
+    def test_onnxruntime_reproduces_outputs(self, vectors):
+        features = np.array(
+            [c["features"] for c in vectors["cases"]], dtype=np.float32
+        )
+        expected = np.array(
+            [c["output"] for c in vectors["cases"]], dtype=np.float32
+        )
+        actual = ort_forward(ort_session(PARITY_MODEL), features)
+        np.testing.assert_allclose(
+            actual, expected, rtol=0, atol=vectors["output_tolerance_abs"]
+        )
+
+    def test_case_coverage(self, vectors):
+        """Guard against a degenerate future regeneration of the fixture."""
+        cases = vectors["cases"]
+        boards = [c["board"] for c in cases]
+
+        assert len(cases) >= 20
+        assert len({c["label"] for c in cases}) == len(cases)
+        assert any(b["bar_player"] > 0 for b in boards)
+        assert any(b["off_player"] >= 15 for b in boards)  # game over
+        assert any(not b["player_to_move"] for b in boards)
+        assert any(max(b["points"]) > 5 for b in boards)  # overflow
+        assert any(  # empty board: the total_pips == 0 branch
+            all(p == 0 for p in b["points"]) and b["bar_player"] == 0
+            for b in boards
+        )
