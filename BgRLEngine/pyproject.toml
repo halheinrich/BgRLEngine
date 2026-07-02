@@ -1,0 +1,32 @@
+# BgRLEngine — project metadata and dependency record.
+#
+# This is the canonical dependency list for the project venv (there is no
+# requirements.txt: the repo .gitignore excludes *.txt, which would silently
+# drop it from version control).
+#
+# The project is an application, not an installable package — modules are
+# imported from the project root (engine/, training/, utils/). Install
+# dependencies into the venv directly:
+#
+#   python -m pip install numpy pyyaml onnx onnxruntime pytest pytest-cov
+#   # torch needs the CUDA index for the +cu121 build:
+#   python -m pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+[project]
+name = "bgrlengine"
+version = "0.1.0"
+description = "TD-Gammon-style backgammon engine: self-play TD(lambda) training, ONNX export, parity fixtures"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.3",
+    "PyYAML>=6.0",
+    "torch>=2.5",
+    "onnx>=1.22",
+    "onnxruntime>=1.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0",
+    "pytest-cov>=7.0",
+]

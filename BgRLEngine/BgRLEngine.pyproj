@@ -43,7 +43,6 @@
   <ItemGroup>
     <Content Include="configs\**\*.yaml" />
     <Content Include="pyproject.toml" />
-    <Content Include="requirements.txt" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="engine\" />
