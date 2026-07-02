@@ -26,6 +26,15 @@ from __future__ import annotations
 
 import numpy as np
 
+# Version of the board→feature encoding contract defined in this module.
+# Stamped into every exported ONNX model (bgrl.encoding_version) so a
+# cross-language consumer can fail fast on a mismatched model instead of
+# silently mis-evaluating — the same handshake pattern as
+# REQUIRED_MOVEGEN_VERSION in engine/movegen.py. Bump on ANY change to the
+# feature layout, sizes, or arithmetic below, and regenerate the parity
+# fixtures (parity/generate_vectors.py).
+ENCODING_VERSION = 1
+
 # Board constants
 NUM_POINTS = 24
 CHECKERS_PER_PLAYER = 15

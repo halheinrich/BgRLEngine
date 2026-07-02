@@ -26,7 +26,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="engine\movegen.py" />
+    <Compile Include="engine\export.py" />
     <Compile Include="main.py" />
+    <Compile Include="export_onnx.py" />
     <Compile Include="engine\__init__.py" />
     <Compile Include="engine\state.py" />
     <Compile Include="engine\network.py" />
@@ -38,6 +40,7 @@
     <Compile Include="utils\sprt.py" />
     <Compile Include="tests\__init__.py" />
     <Compile Include="tests\test_core.py" />
+    <Compile Include="tests\test_parity.py" />
     <Compile Include="tests\run_tests.py" />
   </ItemGroup>
   <ItemGroup>

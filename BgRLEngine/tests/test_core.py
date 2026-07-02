@@ -239,6 +239,22 @@ class TestNetwork:
         y = net.evaluate(x)
         assert y.shape == (NUM_OUTPUTS,)
 
+    def test_from_state_dict_infers_architecture(self):
+        import torch
+        net = TDNetwork(hidden_layers=[64, 32])
+        rebuilt = TDNetwork.from_state_dict(net.state_dict())
+        assert rebuilt.input_size == BOARD_FEATURE_SIZE
+        assert rebuilt.hidden_layers == [64, 32]
+        x = torch.randn(4, BOARD_FEATURE_SIZE)
+        assert torch.equal(net(x), rebuilt(x))
+
+    def test_from_state_dict_rejects_wrong_output_size(self):
+        # Only the first Linear (8 outputs) — a "final layer" of size 8 ≠ 6.
+        sd = TDNetwork(input_size=10, hidden_layers=[8]).state_dict()
+        bad = {k: v for k, v in sd.items() if k.startswith("network.0.")}
+        with pytest.raises(ValueError):
+            TDNetwork.from_state_dict(bad)
+
     def test_equity_computation(self):
         import torch
         output = torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]])

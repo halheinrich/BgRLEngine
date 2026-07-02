@@ -45,6 +45,9 @@ class TDNetwork(nn.Module):
         if hidden_layers is None:
             hidden_layers = [256, 256]
 
+        self._input_size = input_size
+        self._hidden_layers = list(hidden_layers)
+
         layers: list[nn.Module] = []
         prev_size = input_size
 
@@ -62,6 +65,66 @@ class TDNetwork(nn.Module):
 
         # Initialize weights using Xavier uniform for better training start
         self._init_weights()
+
+    @property
+    def input_size(self) -> int:
+        """Size of the input feature vector."""
+        return self._input_size
+
+    @property
+    def hidden_layers(self) -> list[int]:
+        """Hidden layer sizes (copy; the architecture is immutable)."""
+        return list(self._hidden_layers)
+
+    @classmethod
+    def from_state_dict(cls, state_dict: dict) -> TDNetwork:
+        """Reconstruct a TDNetwork from a saved state dict.
+
+        The architecture (input size and hidden layer sizes) is inferred
+        from the Linear weight shapes, so checkpoints need no accompanying
+        config to be loaded. Dropout is not represented in a state dict
+        and is irrelevant for inference; the reconstructed network has
+        dropout disabled.
+
+        Args:
+            state_dict: a TDNetwork state dict (as saved by torch.save).
+
+        Returns:
+            A TDNetwork with the inferred architecture and loaded weights.
+
+        Raises:
+            ValueError: state dict does not describe a TDNetwork
+                        (no Linear weights, mismatched chain, or wrong
+                        output size).
+        """
+        # Linear weights are the 2-D entries, named "network.{i}.weight";
+        # sort by module index to guard against reordered dicts.
+        weight_keys = sorted(
+            (k for k, v in state_dict.items()
+             if k.endswith(".weight") and v.dim() == 2),
+            key=lambda k: int(k.split(".")[1]),
+        )
+        if not weight_keys:
+            raise ValueError("state dict contains no Linear weights")
+
+        shapes = [tuple(state_dict[k].shape) for k in weight_keys]
+        for (out_prev, _), (_, in_next) in zip(shapes, shapes[1:]):
+            if out_prev != in_next:
+                raise ValueError(
+                    f"state dict layer shapes do not chain: {shapes}"
+                )
+        if shapes[-1][0] != NUM_OUTPUTS:
+            raise ValueError(
+                f"state dict output size is {shapes[-1][0]}, "
+                f"expected {NUM_OUTPUTS}"
+            )
+
+        network = cls(
+            input_size=shapes[0][1],
+            hidden_layers=[out for out, _ in shapes[:-1]],
+        )
+        network.load_state_dict(state_dict)
+        return network
 
     def _init_weights(self) -> None:
         """Initialize network weights."""
