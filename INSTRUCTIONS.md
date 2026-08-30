@@ -33,8 +33,8 @@ BgRLEngine/
     ├── pyproject.toml              canonical dependency record (no requirements.txt — see Pitfalls)
     ├── main.py                     entry point (CLI training driver)
     ├── export_onnx.py              CLI: trainer checkpoint (.pt) → ONNX
-    ├── compare_configs.py
-    ├── profile_training.py
+    ├── compare_configs.py          equity-weight config comparison (stale — see next steps)
+    ├── profile_training.py         self-play vs. TD-update timing split
     ├── configs/
     │   ├── default.yaml            base hyperparameters
     │   ├── dmp.yaml                Standard DMP (double-match point)
@@ -62,8 +62,8 @@ BgRLEngine/
     │   ├── test_core.py            pytest (requires torch)
     │   ├── test_parity.py          PyTorch↔ONNX Runtime parity + fixture gate
     │   ├── run_tests.py            standalone (no torch)
-    │   ├── bench_encode.py
-    │   └── verify_bg960.py
+    │   ├── bench_encode.py         encode_board_batch correctness + speedup benchmark
+    │   └── verify_bg960.py         Bg960 starting-position constraint checker
     ├── native/                     published BgMoveGen DLL (gitignored)
     └── output/                     training artifacts (gitignored)
 ```
@@ -196,7 +196,7 @@ python -m parity.generate_vectors        # regenerate committed parity fixtures
 - **Two-network evaluation.** `play_game()` takes an optional `opponent` parameter. Without it, both sides use the same network (self-play for training). `evaluate_against()` and `_run_sprt()` **must** pass the opponent network — otherwise they silently test self-play and always report ~50%.
 - **BgMoveGen DLL publish.** `native/` is gitignored; after cloning, publish explicitly from the BgMoveGen project, not the solution: `dotnet publish BgMoveGen/BgMoveGen.csproj -c Release -r win-x64 -o "<repo>/BgRLEngine/BgRLEngine/native"`. Solution-level publish is managed-only and won't emit the unmanaged DLL.
 - **BgMoveGen version lock.** `REQUIRED_MOVEGEN_VERSION` in `engine/movegen.py` must match BgMoveGen's `get_version()` return value. Bump both sides together on any breaking interop change — the wrapper asserts on load.
-- **UTF-8 on Windows.** Every `open()` for config/data files must pass `encoding="utf-8"`. Default `cp1252` chokes on YAML comments containing non-ASCII.
+- **UTF-8 on Windows.** Every `open()` for config/data files must pass `encoding="utf-8"`. Default `cp1252` chokes on YAML comments containing non-ASCII. **Console output is the same trap:** a standalone script that prints a non-ASCII status marker dies on its own success message under the default `cp1252` stdout, after the work it was measuring already succeeded. `sys.stdout.reconfigure(encoding="utf-8")` at the top of such scripts.
 - **PyTorch CUDA memory query.** The attribute is `total_memory`, not `total_mem` — use `torch.cuda.get_device_properties(0).total_memory`.
 - **Python venv setup on Windows.** No `setup_env.bat` ships with the repo; create the venv manually with `python -m venv env`, then activate via `.\env\Scripts\Activate.ps1` (PowerShell) or `env\Scripts\activate.bat` (cmd). Windows PowerShell 5.1 rejects `&&` as a statement separator — chain with `;` or run as two commands. (PowerShell 7+ / pwsh supports `&&` and `||` like bash.)
 - **No variant flags in state encoding.** Tempting to add a one-hot "this is Nackgammon" feature when debugging variant-specific regressions; don't. Rules are identical across variants and the 303-feature encoding is load-bearing for cross-variant weight transfer.
@@ -210,10 +210,9 @@ python -m parity.generate_vectors        # regenerate committed parity fixtures
 - **Config-specific promotion metrics.** Match win rate, equity error, gammon rate — the 75% per-game threshold is unreachable at higher levels and one metric does not fit all configs.
 - **Multi-core parallelization of self-play.** Currently single-process; training throughput is the bottleneck for higher-level runs.
 - **Portfolio export shape.** One network per ONNX file today. When a second expert (race engine) exists, decide fused-graph vs. router + experts with routing consumer-side — an SSOT trade-off to weigh with evidence, not before.
-- **Test files missing from `.pyproj`.** `tests/bench_encode.py` and `tests/verify_bg960.py` exist on disk but are not listed under `<Compile>` in `BgRLEngine.pyproj`. Either add them or delete them.
 - **`main.py` docstring drift.** Docstring claims invocation via `python -m bgrle.main`, but no `bgrle` package exists; `<StartupFile>` confirms the actual entry is `python main.py`. Fix the docstring.
 - **Dead `TDNetwork.evaluate()` method.** `evaluate(features)` is defined on the network but unused — `select_play()` calls `network(batch)` directly under `torch.no_grad()`. Either remove the dead surface or document a use case.
 - **`dice.py` directory-tree annotation overstates.** The tree in this doc annotates `dice.py` as `generate_plays + helpers (tests only)`, but `compare_configs.py:22` imports both `generate_plays` and `_apply_move` from `engine.dice` — a profiling/comparison script alongside `profile_training.py`, not a test. One-line scope correction at next touch.
-- **`compare_configs.py` imports the underscore-private `_apply_move`** from `engine.dice`. Either `_apply_move` is promoted (drop the underscore prefix, signaling intended cross-module use) or `compare_configs.py` is reworked to avoid it. Visibility-leak observation.
+- **`compare_configs.py` is stale against the successor-state architecture.** It imports `_apply_play` from `engine.game` — removed when play selection moved to successor states — so the module no longer imports at all; it also reaches for the underscore-private `_apply_move` in `engine.dice`, a visibility leak of the same vintage. Repairing it is a rewrite against the current API, not a bitrot fix, and the tool's purpose (which play do two equity-weight configs disagree on?) is still valid — so this is a repair-or-delete decision, not a defect. It is deliberately **left out of `<Compile>`** until that decision lands: listing a module that cannot be imported would be worse than the omission. If it is repaired, `_apply_move` is either promoted (drop the underscore, signaling intended cross-module use) or avoided.
 - **Public API block shows `REQUIRED_MOVEGEN_VERSION`'s literal value.** The listing renders `REQUIRED_MOVEGEN_VERSION: int = 100` — same drift class as the already-stripped `(currently 100)` Pitfall reference. An API listing should show the type but not the assigned default. One-line fix at next touch.
 - **Record the NativeAOT coupling in Pitfalls.** This engine consumes BgMoveGen via a published, **gitignored** DLL — invisible to csproj audits and to git history. Any BgMoveGen behavior change requires a DLL republish plus a pytest re-run; the `REQUIRED_MOVEGEN_VERSION` handshake guards the interop contract, not bugfixes within it. The umbrella's dependency-graph cross-edge note carries the same fact; Pitfalls is where a session touching this repo will actually see it.

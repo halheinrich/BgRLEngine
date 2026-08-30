@@ -29,6 +29,7 @@
     <Compile Include="engine\export.py" />
     <Compile Include="main.py" />
     <Compile Include="export_onnx.py" />
+    <Compile Include="profile_training.py" />
     <Compile Include="engine\__init__.py" />
     <Compile Include="engine\state.py" />
     <Compile Include="engine\network.py" />
@@ -42,6 +43,8 @@
     <Compile Include="tests\test_core.py" />
     <Compile Include="tests\test_parity.py" />
     <Compile Include="tests\run_tests.py" />
+    <Compile Include="tests\bench_encode.py" />
+    <Compile Include="tests\verify_bg960.py" />
     <Compile Include="parity\__init__.py" />
     <Compile Include="parity\generate_vectors.py" />
   </ItemGroup>

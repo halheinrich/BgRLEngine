@@ -1,12 +1,20 @@
-"""Profile one training iteration to find the bottleneck."""
+"""Profile one training iteration to find the bottleneck.
+
+Usage (from the project root, alongside main.py):
+    python profile_training.py
+"""
 import time
 import torch
 import numpy as np
 from engine.network import TDNetwork
 from engine.game import play_game
 from engine.state import BoardState, BOARD_FEATURE_SIZE
-from engine.movegen import get_starting_position, Variant
+from engine.movegen import get_starting_position, load_movegen, Variant
 from training.td_trainer import td_lambda_update
+
+# get_starting_position() asserts the DLL is loaded. The default path is
+# resolved from the package root, so this does not depend on the cwd.
+load_movegen()
 
 dev = torch.device("cpu")
 net = TDNetwork(BOARD_FEATURE_SIZE).to(dev)

@@ -21,6 +21,10 @@ import argparse
 import numpy as np
 from pathlib import Path
 
+# Windows' default cp1252 stdout cannot encode this script's ✓ marker.
+# Be explicit about UTF-8 here, as the repo already is for file I/O.
+sys.stdout.reconfigure(encoding="utf-8")
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--n", type=int, default=200, help="Number of positions to check")
 args = parser.parse_args()

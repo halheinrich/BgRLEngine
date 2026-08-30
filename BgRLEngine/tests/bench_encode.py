@@ -12,6 +12,10 @@ import timeit
 import argparse
 import numpy as np
 
+# Windows' default cp1252 stdout cannot encode this script's ✓ marker.
+# Be explicit about UTF-8 here, as the repo already is for file I/O.
+sys.stdout.reconfigure(encoding="utf-8")
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--reps", type=int, default=10_000)
 args = parser.parse_args()
