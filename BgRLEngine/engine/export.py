@@ -40,7 +40,11 @@ from pathlib import Path
 import onnx
 import torch
 
-from engine.network import NUM_OUTPUTS, TDNetwork
+from engine.network import (
+    CHECKPOINT_ARCHITECTURE_KEY,
+    NUM_OUTPUTS,
+    TDNetwork,
+)
 from engine.state import ENCODING_VERSION
 
 # Opset 17: stable, supported by all current ONNX Runtime releases, and
@@ -134,8 +138,9 @@ def export_checkpoint(
 ) -> tuple[Path, dict[str, str]]:
     """Export a trainer checkpoint (.pt) to ONNX with full provenance.
 
-    The architecture is inferred from the checkpoint's model state dict
-    (TDNetwork.from_state_dict), so no config file is needed.
+    The architecture comes from the checkpoint itself — its embedded
+    self-description, or the weight shapes for checkpoints written before
+    that contract existed — so no config file is needed.
 
     Args:
         checkpoint_path: path to a checkpoint saved by the trainer.
@@ -153,7 +158,10 @@ def export_checkpoint(
     checkpoint = torch.load(
         checkpoint_path, map_location="cpu", weights_only=True
     )
-    network = TDNetwork.from_state_dict(checkpoint["model_state_dict"])
+    network = TDNetwork.from_state_dict(
+        checkpoint["model_state_dict"],
+        architecture=checkpoint.get(CHECKPOINT_ARCHITECTURE_KEY),
+    )
 
     stats = checkpoint.get("stats", {})
     provenance = {

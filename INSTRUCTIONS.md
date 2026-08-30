@@ -104,6 +104,8 @@ The diagram is the design target; most branches are not yet trained. Phase 1 sco
 
 **ONNX export & the cross-language contract.** Trained checkpoints become consumable outside Python (BgInference, C#) via `engine/export.py`. Graph contract: input `features` float32 `[batch, input_size]` (dynamic batch), output `probabilities` float32 `[batch, 6]`, opset 17. The metadata contract is embedded in the `.onnx` file's `metadata_props` (`bgrl.*` keys — no sidecar to drift; ONNX Runtime exposes it as `ModelMetadata.CustomMetadataMap`): `bgrl.encoding_version` is the fail-fast handshake (consumer holds its own required version, mirroring the `REQUIRED_MOVEGEN_VERSION` pattern), plus structural keys and checkpoint provenance (source file, sha256, games/level). **Exported trained models are deployment artifacts, never committed** — produce them locally with `export_onnx.py`. One network per ONNX file; the portfolio-of-experts export shape (fused graph vs. router + experts) is deliberately deferred until more than the General engine exists — `bgrl.model_role` keeps exports self-describing for that future.
 
+**Checkpoints self-describe their architecture.** `_save_checkpoint` embeds `TDNetwork.architecture` (`{input_size, hidden_layers}`) under the checkpoint dict key `CHECKPOINT_ARCHITECTURE_KEY` — the same no-sidecar principle the `bgrl.*` ONNX metadata applies to exported models, one level up the pipeline. `TDNetwork.from_state_dict` prefers that embedded description and **cross-checks it against the weight shapes**: disagreement means the file is corrupt or hand-edited, so it raises rather than trusting either side. Checkpoints written before the contract existed carry no such key and still load, by inferring the architecture from the weight shapes — the fallback is permanent, not a migration window (`output/` is gitignored, so pre-contract checkpoints are exactly the ones that cannot be regenerated). Dropout is deliberately excluded from the self-description: it leaves no trace in the weights and is irrelevant for inference.
+
 **Parity fixtures are the encoding's cross-language SSOT mitigation.** The 303-feature encoding must be reimplemented in C# and cannot be single-sourced, so `parity/` commits the executable contract: a tiny deterministic parity model (`model.onnx`, 303→16→16→6, seeded-NumPy weights, byte-identical on regeneration — not a trained model) plus `vectors.json`, 28 golden board→features→output triples sha256-paired to the model. The consumer gate reads its tolerances from the fixture (encoding pin bit-exact, inference pin abs 1e-5). Committed here rather than the umbrella's gitignored `TestData/` so a fresh checkout fails loud, never no-ops.
 
 ## Public API
@@ -130,11 +132,18 @@ def get_starting_position(variant: Variant | int = Variant.STANDARD,
                           seed: int | None = None) -> BoardState
 
 # engine/network.py
+CHECKPOINT_ARCHITECTURE_KEY: str                        # checkpoint dict key
 class TDNetwork(nn.Module):
     input_size: int                                     # read-only property
     hidden_layers: list[int]                            # read-only property (copy)
+    architecture: dict                                  # read-only property (copy);
+                                                        # {input_size, hidden_layers}
     @classmethod
-    def from_state_dict(cls, state_dict) -> TDNetwork   # architecture inferred from weight shapes
+    def from_state_dict(cls, state_dict,
+                        architecture: dict | None = None) -> TDNetwork
+                                                        # embedded architecture preferred and
+                                                        # verified; inferred from weight shapes
+                                                        # when absent
     def forward(x: torch.Tensor) -> torch.Tensor        # (..., 6)
     def evaluate(features: torch.Tensor) -> torch.Tensor
 def compute_equity(output: torch.Tensor,
@@ -200,7 +209,6 @@ python -m parity.generate_vectors        # regenerate committed parity fixtures
 - **Best-of-3 series promotion metric.** The single-game win-rate metric loses signal at higher curriculum levels — dice variance swamps the skill differential between consecutive levels. Design questions are settled; implementation pending.
 - **Config-specific promotion metrics.** Match win rate, equity error, gammon rate — the 75% per-game threshold is unreachable at higher levels and one metric does not fit all configs.
 - **Multi-core parallelization of self-play.** Currently single-process; training throughput is the bottleneck for higher-level runs.
-- **Checkpoints don't self-describe their architecture.** `_save_checkpoint` stores no `hidden_layers`; loading infers the architecture from weight shapes (`TDNetwork.from_state_dict`). Works, but embedding the config in the checkpoint dict would be the durable fix — touches training code, deferred.
 - **Portfolio export shape.** One network per ONNX file today. When a second expert (race engine) exists, decide fused-graph vs. router + experts with routing consumer-side — an SSOT trade-off to weigh with evidence, not before.
 - **Test files missing from `.pyproj`.** `tests/bench_encode.py` and `tests/verify_bg960.py` exist on disk but are not listed under `<Compile>` in `BgRLEngine.pyproj`. Either add them or delete them.
 - **`main.py` docstring drift.** Docstring claims invocation via `python -m bgrle.main`, but no `bgrle` package exists; `<StartupFile>` confirms the actual entry is `python main.py`. Fix the docstring.

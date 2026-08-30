@@ -29,7 +29,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from engine.state import BOARD_FEATURE_SIZE
-from engine.network import TDNetwork, NUM_OUTPUTS, compute_equity
+from engine.network import (
+    CHECKPOINT_ARCHITECTURE_KEY,
+    NUM_OUTPUTS,
+    TDNetwork,
+    compute_equity,
+)
 from engine.game import play_game, GameRecord, GameResult
 from engine.movegen import get_starting_position, Variant
 from utils.sprt import SPRTResult, sprt_test
@@ -337,25 +342,32 @@ class Trainer:
         return improvement < self.staleness_min_improvement
 
     def _freeze_checkpoint(self) -> TDNetwork:
-        """Create a frozen copy of the current network on CPU."""
-        checkpoint = TDNetwork(
-            input_size=BOARD_FEATURE_SIZE,
-            hidden_layers=self.config.get("network", {}).get(
-                "hidden_layers", [256, 256]
-            ),
-        ).to(self.play_device)
+        """Create a frozen copy of the current network on CPU.
+
+        The copy's architecture comes from the live network, not from the
+        config — the network is the single source of truth for its own
+        shape once constructed.
+        """
         state_dict = {k: v.cpu() for k, v in self.network.state_dict().items()}
-        checkpoint.load_state_dict(state_dict)
+        checkpoint = TDNetwork.from_state_dict(
+            state_dict, architecture=self.network.architecture
+        ).to(self.play_device)
         checkpoint.eval()
         return checkpoint
 
     def _save_checkpoint(self, label: str) -> Path:
-        """Save the current network to disk."""
+        """Save the current network to disk.
+
+        The checkpoint embeds the network's architecture so it can be
+        rebuilt from the file alone; see the checkpoint architecture
+        contract in `engine/network.py`.
+        """
         path       = self.output_dir / f"checkpoint_{label}.pt"
         state_dict = {k: v.cpu() for k, v in self.network.state_dict().items()}
         torch.save({
             "model_state_dict":     state_dict,
             "optimizer_state_dict": self.optimizer.state_dict(),
+            CHECKPOINT_ARCHITECTURE_KEY: self.network.architecture,
             "stats": {
                 "games_played":   self.stats.games_played,
                 "current_level":  self.stats.current_level,

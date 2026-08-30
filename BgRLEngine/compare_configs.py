@@ -17,8 +17,12 @@ import torch
 from dataclasses import dataclass
 from pathlib import Path
 
-from engine.state import BoardState, encode_board, flip_perspective, BOARD_FEATURE_SIZE
-from engine.network import TDNetwork, compute_equity
+from engine.state import BoardState, encode_board, flip_perspective
+from engine.network import (
+    CHECKPOINT_ARCHITECTURE_KEY,
+    TDNetwork,
+    compute_equity,
+)
 from engine.dice import generate_plays, roll_dice, _apply_move
 from engine.movegen import get_starting_position, Variant
 from engine.game import _apply_play
@@ -80,9 +84,11 @@ def load_model(config_name: str) -> tuple[TDNetwork, torch.Tensor]:
 
     print(f"  {config_name}: loading {best.name} (level {best_level})")
 
-    net = TDNetwork(input_size=BOARD_FEATURE_SIZE)
     data = torch.load(best, map_location="cpu", weights_only=True)
-    net.load_state_dict(data["model_state_dict"])
+    net = TDNetwork.from_state_dict(
+        data["model_state_dict"],
+        architecture=data.get(CHECKPOINT_ARCHITECTURE_KEY),
+    )
     net.eval()
 
     return net, weights

@@ -32,7 +32,11 @@ from engine.export import (
     export_checkpoint,
     export_network,
 )
-from engine.network import NUM_OUTPUTS, TDNetwork
+from engine.network import (
+    CHECKPOINT_ARCHITECTURE_KEY,
+    NUM_OUTPUTS,
+    TDNetwork,
+)
 from engine.state import (
     BOARD_FEATURE_SIZE,
     ENCODING_VERSION,
@@ -129,7 +133,8 @@ class TestCheckpointExport:
             self.CHECKPOINT, map_location="cpu", weights_only=True
         )
         network = TDNetwork.from_state_dict(
-            checkpoint["model_state_dict"]
+            checkpoint["model_state_dict"],
+            architecture=checkpoint.get(CHECKPOINT_ARCHITECTURE_KEY),
         ).eval()
 
         rng = np.random.default_rng(2)

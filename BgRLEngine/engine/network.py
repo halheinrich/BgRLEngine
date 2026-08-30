@@ -6,6 +6,21 @@ P(lose), P(lose gammon), P(lose backgammon).
 
 Architecture is configurable via hidden layer sizes. Uses ReLU activation
 for hidden layers and sigmoid for the output layer.
+
+Checkpoint architecture contract — a saved checkpoint carries its own
+architecture, so nothing outside the file is needed to rebuild the
+network (the same no-sidecar principle the ONNX `bgrl.*` metadata
+contract applies to exported models; see `engine/export.py`):
+
+    CHECKPOINT_ARCHITECTURE_KEY   checkpoint dict key holding the mapping
+                                  produced by `TDNetwork.architecture`
+                                  ({"input_size", "hidden_layers"}).
+
+`TDNetwork.from_state_dict` prefers that embedded architecture and
+verifies it against the weight shapes, refusing a checkpoint whose
+self-description and weights disagree. Checkpoints written before the
+contract existed carry no such key; they still load, by inferring the
+architecture from the weight shapes.
 """
 
 from __future__ import annotations
@@ -23,6 +38,11 @@ OUT_LOSE = 3
 OUT_LOSE_GAMMON = 4
 OUT_LOSE_BG = 5
 NUM_OUTPUTS = 6
+
+# Checkpoint dict key under which the trainer embeds TDNetwork.architecture.
+# Absent from checkpoints saved before the contract existed; those load by
+# inferring the architecture from the weight shapes.
+CHECKPOINT_ARCHITECTURE_KEY = "network_architecture"
 
 
 class TDNetwork(nn.Module):
@@ -76,26 +96,81 @@ class TDNetwork(nn.Module):
         """Hidden layer sizes (copy; the architecture is immutable)."""
         return list(self._hidden_layers)
 
+    @property
+    def architecture(self) -> dict:
+        """Self-description of this network's architecture.
+
+        The keys are the constructor parameters that determine the weight
+        shapes, so ``TDNetwork(**net.architecture)`` rebuilds the same
+        shape. Dropout is deliberately excluded: it leaves no trace in the
+        weights and is irrelevant for inference.
+
+        This mapping is what the trainer embeds in a checkpoint under
+        `CHECKPOINT_ARCHITECTURE_KEY`.
+        """
+        return {
+            "input_size": self._input_size,
+            "hidden_layers": list(self._hidden_layers),
+        }
+
     @classmethod
-    def from_state_dict(cls, state_dict: dict) -> TDNetwork:
+    def from_state_dict(
+        cls,
+        state_dict: dict,
+        architecture: dict | None = None,
+    ) -> TDNetwork:
         """Reconstruct a TDNetwork from a saved state dict.
 
-        The architecture (input size and hidden layer sizes) is inferred
-        from the Linear weight shapes, so checkpoints need no accompanying
-        config to be loaded. Dropout is not represented in a state dict
-        and is irrelevant for inference; the reconstructed network has
-        dropout disabled.
+        The architecture comes from `architecture` when a checkpoint
+        embeds one (see `CHECKPOINT_ARCHITECTURE_KEY`); it is otherwise
+        inferred from the Linear weight shapes, so checkpoints written
+        before the contract existed still load with no accompanying
+        config. An embedded architecture is always cross-checked against
+        the weight shapes: disagreement means the checkpoint is corrupt
+        or hand-edited, and neither side is trusted over the other.
+
+        Dropout is not represented in a state dict and is irrelevant for
+        inference; the reconstructed network has dropout disabled.
 
         Args:
             state_dict: a TDNetwork state dict (as saved by torch.save).
+            architecture: the checkpoint's embedded self-description, or
+                          None to infer the architecture from the weights.
 
         Returns:
-            A TDNetwork with the inferred architecture and loaded weights.
+            A TDNetwork with the resolved architecture and loaded weights.
 
         Raises:
             ValueError: state dict does not describe a TDNetwork
                         (no Linear weights, mismatched chain, or wrong
-                        output size).
+                        output size), the embedded architecture is
+                        malformed, or it disagrees with the weight shapes.
+        """
+        inferred = cls._infer_architecture(state_dict)
+
+        if architecture is None:
+            resolved = inferred
+        else:
+            resolved = cls._coerce_architecture(architecture)
+            if resolved != inferred:
+                raise ValueError(
+                    "checkpoint architecture disagrees with its weight "
+                    f"shapes: embedded {resolved}, inferred {inferred}"
+                )
+
+        network = cls(
+            input_size=resolved["input_size"],
+            hidden_layers=resolved["hidden_layers"],
+        )
+        network.load_state_dict(state_dict)
+        return network
+
+    @staticmethod
+    def _infer_architecture(state_dict: dict) -> dict:
+        """Infer the architecture from a state dict's Linear weight shapes.
+
+        Raises:
+            ValueError: the state dict does not describe a TDNetwork.
         """
         # Linear weights are the 2-D entries, named "network.{i}.weight";
         # sort by module index to guard against reordered dicts.
@@ -119,12 +194,31 @@ class TDNetwork(nn.Module):
                 f"expected {NUM_OUTPUTS}"
             )
 
-        network = cls(
-            input_size=shapes[0][1],
-            hidden_layers=[out for out, _ in shapes[:-1]],
-        )
-        network.load_state_dict(state_dict)
-        return network
+        return {
+            "input_size": shapes[0][1],
+            "hidden_layers": [out for out, _ in shapes[:-1]],
+        }
+
+    @staticmethod
+    def _coerce_architecture(architecture: dict) -> dict:
+        """Normalize an embedded architecture to the canonical form.
+
+        Raises:
+            ValueError: the mapping lacks the required keys or carries
+                        values that are not sizes.
+        """
+        try:
+            resolved = {
+                "input_size": int(architecture["input_size"]),
+                "hidden_layers": [
+                    int(size) for size in architecture["hidden_layers"]
+                ],
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"embedded architecture is malformed: {architecture!r}"
+            ) from exc
+        return resolved
 
     def _init_weights(self) -> None:
         """Initialize network weights."""

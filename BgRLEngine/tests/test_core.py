@@ -11,8 +11,12 @@ from engine.state import (
     BOARD_FEATURE_SIZE, NUM_POINTS, UNITS_PER_POINT,
 )
 from engine.dice import roll_dice, generate_plays, get_dice_to_use
-from engine.network import TDNetwork, compute_equity, NUM_OUTPUTS
-from training.td_trainer import sprt_test, SPRTResult, result_to_target
+from engine.network import (
+    CHECKPOINT_ARCHITECTURE_KEY, TDNetwork, compute_equity, NUM_OUTPUTS,
+)
+from training.td_trainer import (
+    Trainer, sprt_test, SPRTResult, result_to_target,
+)
 
 
 # ── BgMoveGen fixture ──────────────────────────────────────────────
@@ -255,6 +259,45 @@ class TestNetwork:
         with pytest.raises(ValueError):
             TDNetwork.from_state_dict(bad)
 
+    def test_architecture_describes_the_network(self):
+        net = TDNetwork(input_size=12, hidden_layers=[8, 4], dropout=0.5)
+        # Dropout is deliberately absent: it leaves no trace in the weights.
+        assert net.architecture == {
+            "input_size": 12, "hidden_layers": [8, 4],
+        }
+
+    def test_architecture_is_a_copy(self):
+        net = TDNetwork(hidden_layers=[64, 32])
+        net.architecture["hidden_layers"].append(999)
+        assert net.hidden_layers == [64, 32]
+
+    def test_architecture_rebuilds_the_same_shape(self):
+        net = TDNetwork(input_size=12, hidden_layers=[8, 4])
+        assert TDNetwork(**net.architecture).architecture == net.architecture
+
+    def test_from_state_dict_prefers_the_supplied_architecture(self):
+        import torch
+        net = TDNetwork(hidden_layers=[64, 32])
+        rebuilt = TDNetwork.from_state_dict(
+            net.state_dict(), architecture=net.architecture
+        )
+        assert rebuilt.architecture == net.architecture
+        x = torch.randn(4, BOARD_FEATURE_SIZE)
+        assert torch.equal(net(x), rebuilt(x))
+
+    def test_from_state_dict_rejects_architecture_weight_mismatch(self):
+        net = TDNetwork(hidden_layers=[64, 32])
+        lying = {"input_size": BOARD_FEATURE_SIZE, "hidden_layers": [64, 16]}
+        with pytest.raises(ValueError, match="disagrees"):
+            TDNetwork.from_state_dict(net.state_dict(), architecture=lying)
+
+    def test_from_state_dict_rejects_malformed_architecture(self):
+        net = TDNetwork(hidden_layers=[64, 32])
+        with pytest.raises(ValueError, match="malformed"):
+            TDNetwork.from_state_dict(
+                net.state_dict(), architecture={"hidden_layers": [64, 32]}
+            )
+
     def test_equity_computation(self):
         import torch
         output = torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
@@ -264,6 +307,79 @@ class TestNetwork:
         output = torch.tensor([[0.0, 0.0, 0.0, 0.0, 1.0, 0.0]])
         eq = compute_equity(output)
         assert eq.item() == pytest.approx(-2.0)
+
+
+# ── Checkpoint architecture contract ───────────────────────────────
+
+class TestCheckpointArchitecture:
+    """Both checkpoint generations must load, and must load correctly.
+
+    A checkpoint written today embeds `TDNetwork.architecture`; one
+    written before the contract existed carries no such key and is
+    reconstructed by inferring the architecture from the weight shapes.
+    """
+
+    HIDDEN_LAYERS = [16, 8]
+
+    @pytest.fixture
+    def saved_checkpoint(self, tmp_path):
+        """A real checkpoint, written by the trainer's own save path."""
+        import torch
+        with open("configs/default.yaml", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        config["network"]["hidden_layers"] = self.HIDDEN_LAYERS
+        trainer = Trainer(config, torch.device("cpu"), tmp_path / "output")
+        path = trainer._save_checkpoint("architecture_test")
+        return trainer.network, torch.load(
+            path, map_location="cpu", weights_only=True
+        )
+
+    @staticmethod
+    def _load(checkpoint):
+        """Load exactly as the readers do: embedded config when present."""
+        return TDNetwork.from_state_dict(
+            checkpoint["model_state_dict"],
+            architecture=checkpoint.get(CHECKPOINT_ARCHITECTURE_KEY),
+        )
+
+    @staticmethod
+    def _assert_matches(network, original):
+        import torch
+        assert network.architecture == original.architecture
+        x = torch.randn(4, original.input_size)
+        with torch.no_grad():
+            assert torch.equal(network(x), original.cpu()(x))
+
+    def test_save_embeds_the_architecture(self, saved_checkpoint):
+        original, checkpoint = saved_checkpoint
+        assert checkpoint[CHECKPOINT_ARCHITECTURE_KEY] == {
+            "input_size": BOARD_FEATURE_SIZE,
+            "hidden_layers": self.HIDDEN_LAYERS,
+        }
+        assert checkpoint[CHECKPOINT_ARCHITECTURE_KEY] == original.architecture
+
+    def test_current_checkpoint_round_trips(self, saved_checkpoint):
+        original, checkpoint = saved_checkpoint
+        self._assert_matches(self._load(checkpoint), original)
+
+    def test_legacy_checkpoint_falls_back_to_inference(self, saved_checkpoint):
+        original, checkpoint = saved_checkpoint
+        legacy = {
+            k: v for k, v in checkpoint.items()
+            if k != CHECKPOINT_ARCHITECTURE_KEY
+        }
+        assert CHECKPOINT_ARCHITECTURE_KEY not in legacy
+        self._assert_matches(self._load(legacy), original)
+
+    def test_corrupt_architecture_fails_loud(self, saved_checkpoint):
+        _, checkpoint = saved_checkpoint
+        corrupt = dict(checkpoint)
+        corrupt[CHECKPOINT_ARCHITECTURE_KEY] = {
+            "input_size": BOARD_FEATURE_SIZE,
+            "hidden_layers": [size + 1 for size in self.HIDDEN_LAYERS],
+        }
+        with pytest.raises(ValueError, match="disagrees"):
+            self._load(corrupt)
 
 
 # ── SPRT tests ─────────────────────────────────────────────────────
