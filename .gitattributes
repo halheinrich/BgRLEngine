@@ -1,0 +1,6 @@
+# Line-ending policy: LF in the index and in the worktree, on every platform.
+# Ruling: halheinrich/backgammon#28.
+* text=auto eol=lf
+
+# Binary assets: no line-ending conversion, no text diff.
+*.onnx binary
