@@ -29,8 +29,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from engine.state import BOARD_FEATURE_SIZE
+from engine.checkpoint import CheckpointStats, save_checkpoint
 from engine.network import (
-    CHECKPOINT_ARCHITECTURE_KEY,
     NUM_OUTPUTS,
     TDNetwork,
     compute_equity,
@@ -356,24 +356,16 @@ class Trainer:
         return checkpoint
 
     def _save_checkpoint(self, label: str) -> Path:
-        """Save the current network to disk.
+        """Save the current network, optimizer and progress to disk.
 
-        The checkpoint embeds the network's architecture so it can be
-        rebuilt from the file alone; see the checkpoint architecture
-        contract in `engine/network.py`.
+        The file's shape, and what it stamps, is `engine/checkpoint.py`'s.
         """
-        path       = self.output_dir / f"checkpoint_{label}.pt"
-        state_dict = {k: v.cpu() for k, v in self.network.state_dict().items()}
-        torch.save({
-            "model_state_dict":     state_dict,
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            CHECKPOINT_ARCHITECTURE_KEY: self.network.architecture,
-            "stats": {
-                "games_played":   self.stats.games_played,
-                "current_level":  self.stats.current_level,
-                "levels_reached": self.stats.levels_reached,
-            },
-        }, path)
+        path = self.output_dir / f"checkpoint_{label}.pt"
+        save_checkpoint(path, self.network, self.optimizer, CheckpointStats(
+            games_played=self.stats.games_played,
+            current_level=self.stats.current_level,
+            levels_reached=self.stats.levels_reached,
+        ))
         return path
 
     def _run_sprt(self) -> bool:

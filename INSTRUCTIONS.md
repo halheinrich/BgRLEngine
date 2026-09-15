@@ -104,7 +104,7 @@ The diagram is the design target; most branches are not yet trained. Phase 1 sco
 
 **ONNX export & the cross-language contract.** Trained checkpoints become consumable outside Python (BgInference, C#) via `engine/export.py`. Graph contract: input `features` float32 `[batch, input_size]` (dynamic batch), output `probabilities` float32 `[batch, 6]`, opset 17. The metadata contract is embedded in the `.onnx` file's `metadata_props` (`bgrl.*` keys — no sidecar to drift; ONNX Runtime exposes it as `ModelMetadata.CustomMetadataMap`): `bgrl.encoding_version` is the fail-fast handshake (consumer holds its own required version, mirroring the `REQUIRED_MOVEGEN_VERSION` pattern), plus structural keys and checkpoint provenance (source file, sha256, games/level). **Exported trained models are deployment artifacts, never committed** — produce them locally with `export_onnx.py`. One network per ONNX file; the portfolio-of-experts export shape (fused graph vs. router + experts) is deliberately deferred until more than the General engine exists — `bgrl.model_role` keeps exports self-describing for that future.
 
-**Checkpoints self-describe their architecture.** `_save_checkpoint` embeds `TDNetwork.architecture` (`{input_size, hidden_layers}`) under the checkpoint dict key `CHECKPOINT_ARCHITECTURE_KEY` — the same no-sidecar principle the `bgrl.*` ONNX metadata applies to exported models, one level up the pipeline. `TDNetwork.from_state_dict` prefers that embedded description and **cross-checks it against the weight shapes**: disagreement means the file is corrupt or hand-edited, so it raises rather than trusting either side. Checkpoints written before the contract existed carry no such key and still load, by inferring the architecture from the weight shapes — the fallback is permanent, not a migration window (`output/` is gitignored, so pre-contract checkpoints are exactly the ones that cannot be regenerated). Dropout is deliberately excluded from the self-description: it leaves no trace in the weights and is irrelevant for inference.
+**The checkpoint contract has one owner: `engine/checkpoint.py`.** The `.pt` file's shape is that module's and nobody else's — `save_checkpoint` writes it (the trainer's `_save_checkpoint` is a call into it) and `load_checkpoint` is the one path by which a checkpoint becomes a network; no caller builds or indexes the dict. Every save stamps two self-description keys beside the weights, optimizer state and stats — the same no-sidecar principle the `bgrl.*` ONNX metadata applies to exported models, one level up the pipeline: `CHECKPOINT_ARCHITECTURE_KEY` (`TDNetwork.architecture`, `{input_size, hidden_layers}`) and `CHECKPOINT_ENCODING_VERSION_KEY` (`ENCODING_VERSION` at save time). `load_checkpoint` enforces both. *Encoding handshake:* a checkpoint stamped with another encoding version refuses to load, the `ValueError` naming both versions — weights trained against one encoding evaluate silently wrong under another of the same input size, and nothing migrates on load. An unstamped checkpoint is read as encoding 1 with a `UserWarning`: encoding 1 is the only encoding that existed before the stamp, and every save now stamps, so the case dies out. *Architecture:* the embedded description is preferred and `TDNetwork.from_state_dict` **cross-checks it against the weight shapes** — disagreement means the file is corrupt or hand-edited, so it raises rather than trusting either side. A checkpoint written before the architecture key existed loads by inferring the architecture from the weight shapes; that fallback is permanent, not a migration window (`output/` is gitignored, so pre-contract checkpoints are exactly the ones that cannot be regenerated). Dropout is deliberately excluded from the self-description: it leaves no trace in the weights and is irrelevant for inference.
 
 **Parity fixtures are the encoding's cross-language SSOT mitigation.** The 303-feature encoding must be reimplemented in C# and cannot be single-sourced, so `parity/` commits the executable contract: a tiny deterministic parity model (`model.onnx`, 303→16→16→6, seeded-NumPy weights, byte-identical on regeneration — not a trained model) plus `vectors.json`, 28 golden board→features→output triples sha256-paired to the model. The consumer gate reads its tolerances from the fixture (encoding pin bit-exact, inference pin abs 1e-5). Committed here rather than the umbrella's gitignored `TestData/` so a fresh checkout fails loud, never no-ops.
 
@@ -132,7 +132,6 @@ def get_starting_position(variant: Variant | int = Variant.STANDARD,
                           seed: int | None = None) -> BoardState
 
 # engine/network.py
-CHECKPOINT_ARCHITECTURE_KEY: str                        # checkpoint dict key
 class TDNetwork(nn.Module):
     input_size: int                                     # read-only property
     hidden_layers: list[int]                            # read-only property (copy)
@@ -152,6 +151,25 @@ def compute_match_equity(output: torch.Tensor,
                          gammon_value_win: float, gammon_value_lose: float,
                          bg_value_win: float = 0.0,
                          bg_value_lose: float = 0.0) -> torch.Tensor
+
+# engine/checkpoint.py
+CHECKPOINT_ARCHITECTURE_KEY: str                        # stamped keys; importable so contract
+CHECKPOINT_ENCODING_VERSION_KEY: str                    # tests can inspect a saved file by key
+@dataclass(frozen=True)
+class CheckpointStats:
+    games_played: int
+    current_level: int
+    levels_reached: int
+@dataclass(frozen=True)
+class LoadedCheckpoint:
+    network: TDNetwork
+    stats: CheckpointStats
+def save_checkpoint(path, network: TDNetwork,
+                    optimizer: torch.optim.Optimizer,
+                    stats: CheckpointStats) -> None     # stamps both keys
+def load_checkpoint(path) -> LoadedCheckpoint          # encoding handshake, then
+                                                        # from_state_dict with the embedded
+                                                        # architecture
 
 # engine/export.py
 ONNX_OPSET: int = 17
@@ -201,7 +219,8 @@ python -m parity.generate_vectors        # regenerate committed parity fixtures
 - **Python venv setup on Windows.** No `setup_env.bat` ships with the repo; create the venv manually with `python -m venv env`, then activate via `.\env\Scripts\Activate.ps1` (PowerShell) or `env\Scripts\activate.bat` (cmd). Windows PowerShell 5.1 rejects `&&` as a statement separator — chain with `;` or run as two commands. (PowerShell 7+ / pwsh supports `&&` and `||` like bash.)
 - **No variant flags in state encoding.** Tempting to add a one-hot "this is Nackgammon" feature when debugging variant-specific regressions; don't. Rules are identical across variants and the 303-feature encoding is load-bearing for cross-variant weight transfer.
 - **`.gitignore` excludes `*.txt` — never add a `requirements.txt`.** It would be silently invisible to version control. `pyproject.toml` is the canonical dependency record; if a new dep is installed, record it there.
-- **Encoding changes require a version bump + fixture regeneration.** Any change to the feature layout, sizes, or arithmetic in `engine/state.py` must bump `ENCODING_VERSION` and regenerate the parity fixtures (`python -m parity.generate_vectors`) in the same commit — `model.onnx` and `vectors.json` are sha256-paired and must always move together. The C# consumer's parity gate and version handshake depend on this discipline.
+- **Encoding changes require a version bump + fixture regeneration.** Any change to the feature layout, sizes, or arithmetic in `engine/state.py` must bump `ENCODING_VERSION` and regenerate the parity fixtures (`python -m parity.generate_vectors`) in the same commit — `model.onnx` and `vectors.json` are sha256-paired and must always move together. The C# consumer's parity gate and version handshake depend on this discipline. A bump also invalidates every earlier training checkpoint for loading.
+- **A checkpoint from another encoding does not load.** `load_checkpoint` refuses a checkpoint stamped with any encoding version but the current one, and there is no migrate-on-load; an unstamped checkpoint is assumed encoding 1, with a warning.
 - **Never commit an exported trained model.** Only `parity/model.onnx` (tiny, deterministic, contract-stable) belongs in git; trained exports are deployment artifacts identified by their embedded `bgrl.checkpoint_sha256` and regenerated locally on demand.
 
 ## Subproject-internal next steps

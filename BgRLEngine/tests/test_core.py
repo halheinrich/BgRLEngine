@@ -11,8 +11,11 @@ from engine.state import (
     BOARD_FEATURE_SIZE, NUM_POINTS, UNITS_PER_POINT,
 )
 from engine.dice import roll_dice, generate_plays, get_dice_to_use
-from engine.network import (
-    CHECKPOINT_ARCHITECTURE_KEY, TDNetwork, compute_equity, NUM_OUTPUTS,
+from engine.network import TDNetwork, compute_equity, NUM_OUTPUTS
+import engine.checkpoint
+from engine.checkpoint import (
+    CHECKPOINT_ARCHITECTURE_KEY, CHECKPOINT_ENCODING_VERSION_KEY,
+    CheckpointStats, load_checkpoint,
 )
 from training.td_trainer import (
     Trainer, sprt_test, SPRTResult, result_to_target,
@@ -309,7 +312,45 @@ class TestNetwork:
         assert eq.item() == pytest.approx(-2.0)
 
 
-# ── Checkpoint architecture contract ───────────────────────────────
+# ── Checkpoint contract ────────────────────────────────────────────
+
+CHECKPOINT_HIDDEN_LAYERS = [16, 8]
+
+
+def _read_raw(path):
+    """The saved file's raw dict, for the contract tests to inspect by key.
+
+    The raw `torch.load` here is deliberate and is not a reader: nothing
+    is rebuilt from it. Every reader that rebuilds a network goes through
+    `load_checkpoint`.
+    """
+    import torch
+    return torch.load(path, map_location="cpu", weights_only=True)
+
+
+@pytest.fixture
+def saved_checkpoint(tmp_path):
+    """A real checkpoint, written by the trainer's own save path.
+
+    Returns the trainer's network, the saved file's path, and the file's
+    raw dict.
+    """
+    import torch
+    with open("configs/default.yaml", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    config["network"]["hidden_layers"] = CHECKPOINT_HIDDEN_LAYERS
+    trainer = Trainer(config, torch.device("cpu"), tmp_path / "output")
+    path = trainer._save_checkpoint("contract_test")
+    return trainer.network, path, _read_raw(path)
+
+
+def _load_edited(raw, tmp_path):
+    """Write an edited checkpoint dict and load it the readers' one way."""
+    import torch
+    path = tmp_path / "edited.pt"
+    torch.save(raw, path)
+    return load_checkpoint(path)
+
 
 class TestCheckpointArchitecture:
     """Both checkpoint generations must load, and must load correctly.
@@ -318,29 +359,6 @@ class TestCheckpointArchitecture:
     written before the contract existed carries no such key and is
     reconstructed by inferring the architecture from the weight shapes.
     """
-
-    HIDDEN_LAYERS = [16, 8]
-
-    @pytest.fixture
-    def saved_checkpoint(self, tmp_path):
-        """A real checkpoint, written by the trainer's own save path."""
-        import torch
-        with open("configs/default.yaml", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-        config["network"]["hidden_layers"] = self.HIDDEN_LAYERS
-        trainer = Trainer(config, torch.device("cpu"), tmp_path / "output")
-        path = trainer._save_checkpoint("architecture_test")
-        return trainer.network, torch.load(
-            path, map_location="cpu", weights_only=True
-        )
-
-    @staticmethod
-    def _load(checkpoint):
-        """Load exactly as the readers do: embedded config when present."""
-        return TDNetwork.from_state_dict(
-            checkpoint["model_state_dict"],
-            architecture=checkpoint.get(CHECKPOINT_ARCHITECTURE_KEY),
-        )
 
     @staticmethod
     def _assert_matches(network, original):
@@ -351,35 +369,148 @@ class TestCheckpointArchitecture:
             assert torch.equal(network(x), original.cpu()(x))
 
     def test_save_embeds_the_architecture(self, saved_checkpoint):
-        original, checkpoint = saved_checkpoint
-        assert checkpoint[CHECKPOINT_ARCHITECTURE_KEY] == {
+        original, _, raw = saved_checkpoint
+        assert raw[CHECKPOINT_ARCHITECTURE_KEY] == {
             "input_size": BOARD_FEATURE_SIZE,
-            "hidden_layers": self.HIDDEN_LAYERS,
+            "hidden_layers": CHECKPOINT_HIDDEN_LAYERS,
         }
-        assert checkpoint[CHECKPOINT_ARCHITECTURE_KEY] == original.architecture
+        assert raw[CHECKPOINT_ARCHITECTURE_KEY] == original.architecture
 
     def test_current_checkpoint_round_trips(self, saved_checkpoint):
-        original, checkpoint = saved_checkpoint
-        self._assert_matches(self._load(checkpoint), original)
+        original, path, _ = saved_checkpoint
+        self._assert_matches(load_checkpoint(path).network, original)
 
-    def test_legacy_checkpoint_falls_back_to_inference(self, saved_checkpoint):
-        original, checkpoint = saved_checkpoint
+    def test_legacy_checkpoint_falls_back_to_inference(
+        self, saved_checkpoint, tmp_path
+    ):
+        original, _, raw = saved_checkpoint
         legacy = {
-            k: v for k, v in checkpoint.items()
+            k: v for k, v in raw.items()
             if k != CHECKPOINT_ARCHITECTURE_KEY
         }
         assert CHECKPOINT_ARCHITECTURE_KEY not in legacy
-        self._assert_matches(self._load(legacy), original)
+        self._assert_matches(_load_edited(legacy, tmp_path).network, original)
 
-    def test_corrupt_architecture_fails_loud(self, saved_checkpoint):
-        _, checkpoint = saved_checkpoint
-        corrupt = dict(checkpoint)
+    def test_corrupt_architecture_fails_loud(self, saved_checkpoint, tmp_path):
+        _, _, raw = saved_checkpoint
+        corrupt = dict(raw)
         corrupt[CHECKPOINT_ARCHITECTURE_KEY] = {
             "input_size": BOARD_FEATURE_SIZE,
-            "hidden_layers": [size + 1 for size in self.HIDDEN_LAYERS],
+            "hidden_layers": [size + 1 for size in CHECKPOINT_HIDDEN_LAYERS],
         }
         with pytest.raises(ValueError, match="disagrees"):
-            self._load(corrupt)
+            _load_edited(corrupt, tmp_path)
+
+
+class TestCheckpointEncodingVersion:
+    """The encoding handshake: a checkpoint loads only under its encoding.
+
+    A checkpoint written today stamps `ENCODING_VERSION`; one written
+    before the stamp existed is read as encoding 1, with a warning.
+    """
+
+    def test_save_stamps_the_current_encoding_version(self, saved_checkpoint):
+        from engine.state import ENCODING_VERSION
+        _, _, raw = saved_checkpoint
+        assert raw[CHECKPOINT_ENCODING_VERSION_KEY] == ENCODING_VERSION
+
+    def test_save_stamps_the_live_constant(self, tmp_path, monkeypatch):
+        # The stamp follows ENCODING_VERSION, not a literal that happens
+        # to equal today's value.
+        import torch
+        monkeypatch.setattr(engine.checkpoint, "ENCODING_VERSION", 7)
+        path = tmp_path / "stamped.pt"
+        network = TDNetwork(hidden_layers=[4])
+        engine.checkpoint.save_checkpoint(
+            path, network, torch.optim.SGD(network.parameters(), lr=0.1),
+            CheckpointStats(games_played=0, current_level=0, levels_reached=0),
+        )
+        assert _read_raw(path)[CHECKPOINT_ENCODING_VERSION_KEY] == 7
+
+    def test_stamped_current_checkpoint_loads_silently(self, saved_checkpoint):
+        import warnings
+        _, path, _ = saved_checkpoint
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            load_checkpoint(path)
+
+    def test_unstamped_checkpoint_loads_as_encoding_1_with_a_warning(
+        self, saved_checkpoint, tmp_path
+    ):
+        original, _, raw = saved_checkpoint
+        unstamped = {
+            k: v for k, v in raw.items()
+            if k != CHECKPOINT_ENCODING_VERSION_KEY
+        }
+        with pytest.warns(UserWarning, match=r"edited\.pt.*encoding version 1\b"):
+            loaded = _load_edited(unstamped, tmp_path)
+        assert loaded.network.architecture == original.architecture
+
+    def test_unstamped_checkpoint_refuses_after_an_encoding_bump(
+        self, saved_checkpoint, tmp_path, monkeypatch
+    ):
+        # Unstamped means encoding 1 — not "whatever is current".
+        _, _, raw = saved_checkpoint
+        unstamped = {
+            k: v for k, v in raw.items()
+            if k != CHECKPOINT_ENCODING_VERSION_KEY
+        }
+        monkeypatch.setattr(engine.checkpoint, "ENCODING_VERSION", 2)
+        with pytest.warns(UserWarning, match="encoding version 1"):
+            with pytest.raises(
+                ValueError,
+                match=r"encoding version 1 \(assumed.*encoding version 2\b",
+            ):
+                _load_edited(unstamped, tmp_path)
+
+    def test_other_encoding_refuses_naming_both_versions(
+        self, saved_checkpoint, tmp_path
+    ):
+        from engine.state import ENCODING_VERSION
+        _, _, raw = saved_checkpoint
+        other = ENCODING_VERSION + 1
+        mismatched = dict(raw)
+        mismatched[CHECKPOINT_ENCODING_VERSION_KEY] = other
+        with pytest.raises(
+            ValueError,
+            match=rf"encoding version {other}\b.*"
+                  rf"encoding version {ENCODING_VERSION}\b",
+        ):
+            _load_edited(mismatched, tmp_path)
+
+    @pytest.mark.parametrize("stamp", ["1", 1.0, True, None])
+    def test_malformed_encoding_stamp_fails_loud(
+        self, saved_checkpoint, tmp_path, stamp
+    ):
+        _, _, raw = saved_checkpoint
+        malformed = dict(raw)
+        malformed[CHECKPOINT_ENCODING_VERSION_KEY] = stamp
+        with pytest.raises(ValueError, match="malformed encoding version"):
+            _load_edited(malformed, tmp_path)
+
+
+class TestCheckpointStats:
+    def test_stats_round_trip(self, saved_checkpoint):
+        _, path, _ = saved_checkpoint
+        # A freshly constructed trainer has made no progress.
+        assert load_checkpoint(path).stats == CheckpointStats(
+            games_played=0, current_level=0, levels_reached=0,
+        )
+
+    @pytest.mark.parametrize("edit", ["missing field", "non-integer"])
+    def test_malformed_stats_fail_loud(self, saved_checkpoint, tmp_path, edit):
+        _, _, raw = saved_checkpoint
+        # The stats key is private to the format; spell it from its owner.
+        stats_key = engine.checkpoint._STATS_KEY
+        stats = dict(raw[stats_key])
+        if edit == "missing field":
+            del stats["games_played"]
+        else:
+            stats["games_played"] = "many"
+        malformed = dict(raw)
+        malformed[stats_key] = stats
+        with pytest.raises(ValueError, match="malformed stats"):
+            _load_edited(malformed, tmp_path)
 
 
 # ── SPRT tests ─────────────────────────────────────────────────────

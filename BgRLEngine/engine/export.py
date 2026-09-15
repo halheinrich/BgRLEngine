@@ -40,11 +40,8 @@ from pathlib import Path
 import onnx
 import torch
 
-from engine.network import (
-    CHECKPOINT_ARCHITECTURE_KEY,
-    NUM_OUTPUTS,
-    TDNetwork,
-)
+from engine.checkpoint import load_checkpoint
+from engine.network import NUM_OUTPUTS, TDNetwork
 from engine.state import ENCODING_VERSION
 
 # Opset 17: stable, supported by all current ONNX Runtime releases, and
@@ -138,9 +135,10 @@ def export_checkpoint(
 ) -> tuple[Path, dict[str, str]]:
     """Export a trainer checkpoint (.pt) to ONNX with full provenance.
 
-    The architecture comes from the checkpoint itself — its embedded
-    self-description, or the weight shapes for checkpoints written before
-    that contract existed — so no config file is needed.
+    The checkpoint is read through `engine.checkpoint.load_checkpoint`,
+    so the encoding handshake runs before anything is exported, and the
+    architecture comes from the checkpoint itself — no config file is
+    needed.
 
     Args:
         checkpoint_path: path to a checkpoint saved by the trainer.
@@ -150,32 +148,30 @@ def export_checkpoint(
 
     Returns:
         (output path, stamped metadata mapping).
+
+    Raises:
+        ValueError: the checkpoint was trained under another encoding
+                    version, or is malformed (see `load_checkpoint`).
     """
     checkpoint_path = Path(checkpoint_path)
     if output_path is None:
         output_path = checkpoint_path.with_suffix(".onnx")
 
-    checkpoint = torch.load(
-        checkpoint_path, map_location="cpu", weights_only=True
-    )
-    network = TDNetwork.from_state_dict(
-        checkpoint["model_state_dict"],
-        architecture=checkpoint.get(CHECKPOINT_ARCHITECTURE_KEY),
-    )
+    checkpoint = load_checkpoint(checkpoint_path)
 
-    stats = checkpoint.get("stats", {})
     provenance = {
         "checkpoint_file": checkpoint_path.name,
         "checkpoint_sha256": hashlib.sha256(
             checkpoint_path.read_bytes()
         ).hexdigest(),
-        "checkpoint_games_played": str(stats.get("games_played", "unknown")),
-        "checkpoint_level": str(stats.get("current_level", "unknown")),
+        "checkpoint_games_played": str(checkpoint.stats.games_played),
+        "checkpoint_level": str(checkpoint.stats.current_level),
         "torch_version": torch.__version__,
         "export_timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
     metadata = export_network(
-        network, output_path, model_role=model_role, provenance=provenance
+        checkpoint.network, output_path,
+        model_role=model_role, provenance=provenance,
     )
     return Path(output_path), metadata

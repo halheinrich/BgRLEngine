@@ -30,9 +30,12 @@ import numpy as np
 # Stamped into every exported ONNX model (bgrl.encoding_version) so a
 # cross-language consumer can fail fast on a mismatched model instead of
 # silently mis-evaluating — the same handshake pattern as
-# REQUIRED_MOVEGEN_VERSION in engine/movegen.py. Bump on ANY change to the
-# feature layout, sizes, or arithmetic below, and regenerate the parity
-# fixtures (parity/generate_vectors.py).
+# REQUIRED_MOVEGEN_VERSION in engine/movegen.py — and into every training
+# checkpoint, which refuses to load under another version (see
+# engine/checkpoint.py). Bump on ANY change to the feature layout, sizes,
+# or arithmetic below, and regenerate the parity fixtures
+# (parity/generate_vectors.py); a bump invalidates every earlier
+# checkpoint for loading.
 ENCODING_VERSION = 1
 
 # Board constants

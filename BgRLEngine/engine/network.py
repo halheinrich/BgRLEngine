@@ -7,20 +7,9 @@ P(lose), P(lose gammon), P(lose backgammon).
 Architecture is configurable via hidden layer sizes. Uses ReLU activation
 for hidden layers and sigmoid for the output layer.
 
-Checkpoint architecture contract — a saved checkpoint carries its own
-architecture, so nothing outside the file is needed to rebuild the
-network (the same no-sidecar principle the ONNX `bgrl.*` metadata
-contract applies to exported models; see `engine/export.py`):
-
-    CHECKPOINT_ARCHITECTURE_KEY   checkpoint dict key holding the mapping
-                                  produced by `TDNetwork.architecture`
-                                  ({"input_size", "hidden_layers"}).
-
-`TDNetwork.from_state_dict` prefers that embedded architecture and
-verifies it against the weight shapes, refusing a checkpoint whose
-self-description and weights disagree. Checkpoints written before the
-contract existed carry no such key; they still load, by inferring the
-architecture from the weight shapes.
+The network describes its own architecture (`TDNetwork.architecture`)
+and rebuilds from a state dict (`TDNetwork.from_state_dict`); the
+checkpoint file that carries both is `engine/checkpoint.py`'s.
 """
 
 from __future__ import annotations
@@ -38,11 +27,6 @@ OUT_LOSE = 3
 OUT_LOSE_GAMMON = 4
 OUT_LOSE_BG = 5
 NUM_OUTPUTS = 6
-
-# Checkpoint dict key under which the trainer embeds TDNetwork.architecture.
-# Absent from checkpoints saved before the contract existed; those load by
-# inferring the architecture from the weight shapes.
-CHECKPOINT_ARCHITECTURE_KEY = "network_architecture"
 
 
 class TDNetwork(nn.Module):
@@ -105,8 +89,8 @@ class TDNetwork(nn.Module):
         shape. Dropout is deliberately excluded: it leaves no trace in the
         weights and is irrelevant for inference.
 
-        This mapping is what the trainer embeds in a checkpoint under
-        `CHECKPOINT_ARCHITECTURE_KEY`.
+        This mapping is what `engine.checkpoint.save_checkpoint` embeds
+        in every checkpoint.
         """
         return {
             "input_size": self._input_size,
@@ -122,7 +106,7 @@ class TDNetwork(nn.Module):
         """Reconstruct a TDNetwork from a saved state dict.
 
         The architecture comes from `architecture` when a checkpoint
-        embeds one (see `CHECKPOINT_ARCHITECTURE_KEY`); it is otherwise
+        embeds one (see `engine/checkpoint.py`); it is otherwise
         inferred from the Linear weight shapes, so checkpoints written
         before the contract existed still load with no accompanying
         config. An embedded architecture is always cross-checked against

@@ -32,11 +32,8 @@ from engine.export import (
     export_checkpoint,
     export_network,
 )
-from engine.network import (
-    CHECKPOINT_ARCHITECTURE_KEY,
-    NUM_OUTPUTS,
-    TDNetwork,
-)
+from engine.checkpoint import load_checkpoint
+from engine.network import NUM_OUTPUTS, TDNetwork
 from engine.state import (
     BOARD_FEATURE_SIZE,
     ENCODING_VERSION,
@@ -129,13 +126,7 @@ class TestCheckpointExport:
             self.CHECKPOINT, tmp_path / "checkpoint.onnx"
         )
 
-        checkpoint = torch.load(
-            self.CHECKPOINT, map_location="cpu", weights_only=True
-        )
-        network = TDNetwork.from_state_dict(
-            checkpoint["model_state_dict"],
-            architecture=checkpoint.get(CHECKPOINT_ARCHITECTURE_KEY),
-        ).eval()
+        network = load_checkpoint(self.CHECKPOINT).network.eval()
 
         rng = np.random.default_rng(2)
         features = rng.random((32, BOARD_FEATURE_SIZE), dtype=np.float32)

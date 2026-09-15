@@ -26,6 +26,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="engine\movegen.py" />
+    <Compile Include="engine\checkpoint.py" />
     <Compile Include="engine\export.py" />
     <Compile Include="main.py" />
     <Compile Include="export_onnx.py" />
