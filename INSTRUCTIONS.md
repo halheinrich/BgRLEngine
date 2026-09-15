@@ -22,51 +22,31 @@ https://github.com/halheinrich/BgRLEngine — branch `main`.
 
 - **BgMoveGen** — move generation and all variant starting positions, consumed at runtime as a native DLL via ctypes (`engine/movegen.py`). No managed interop, no project reference.
 
-## Directory tree
+## Layout
 
-```
-BgRLEngine/
-├── BgRLEngine.slnx
-├── INSTRUCTIONS.md
-└── BgRLEngine/
-    ├── BgRLEngine.pyproj
-    ├── pyproject.toml              canonical dependency record (no requirements.txt — see Pitfalls)
-    ├── main.py                     entry point (CLI training driver)
-    ├── export_onnx.py              CLI: trainer checkpoint (.pt) → ONNX
-    ├── compare_configs.py          equity-weight config comparison (stale — see next steps)
-    ├── profile_training.py         self-play vs. TD-update timing split
-    ├── configs/
-    │   ├── default.yaml            base hyperparameters
-    │   ├── dmp.yaml                Standard DMP (double-match point)
-    │   ├── nackgammon_dmp.yaml
-    │   ├── bg960_dmp.yaml
-    │   ├── money.yaml
-    │   ├── gammon_seeking.yaml
-    │   └── gammon_avoiding.yaml
-    ├── engine/
-    │   ├── state.py                BoardState, 303-feature encoding, ENCODING_VERSION
-    │   ├── movegen.py              BgMoveGen ctypes wrapper + version check
-    │   ├── network.py              TDNetwork (PyTorch), equity computation
-    │   ├── export.py               ONNX export + embedded metadata contract
-    │   ├── game.py                 self-play game simulation
-    │   └── dice.py                 roll_dice (training); generate_plays + helpers (tests only)
-    ├── training/
-    │   └── td_trainer.py           TD(λ) loop, evaluation, SPRT, plateau detection
-    ├── utils/
-    │   └── sprt.py                 standalone SPRT implementation
-    ├── parity/                     committed cross-language parity fixtures
-    │   ├── generate_vectors.py     deterministic fixture generator
-    │   ├── model.onnx              tiny parity model (committed; NOT a trained model)
-    │   └── vectors.json            golden board→features→output triples
-    ├── tests/
-    │   ├── test_core.py            pytest (requires torch)
-    │   ├── test_parity.py          PyTorch↔ONNX Runtime parity + fixture gate
-    │   ├── run_tests.py            standalone (no torch)
-    │   ├── bench_encode.py         encode_board_batch correctness + speedup benchmark
-    │   └── verify_bg960.py         Bg960 starting-position constraint checker
-    ├── native/                     published BgMoveGen DLL (gitignored)
-    └── output/                     training artifacts (gitignored)
-```
+One Python package, `BgRLEngine/`, wrapped for VS tooling by `BgRLEngine.slnx` → `BgRLEngine.pyproj`. The package directory is the import root: scripts and the suite run from it. `pyproject.toml` there is the canonical dependency record (no `requirements.txt` — see Pitfalls).
+
+**`engine/`** — the engine proper. Five areas:
+
+- **Position and encoding** — `state.py`: `BoardState`, the 303-feature encoding (`encode_board`, the vectorized `encode_board_batch`) and `ENCODING_VERSION`, the version every export and checkpoint is stamped with.
+- **Move generation** — `movegen.py`: the ctypes wrapper over the BgMoveGen native DLL (successor states, every variant's starting position) and its `REQUIRED_MOVEGEN_VERSION` check. `dice.py`: `roll_dice`, which self-play uses, beside the older pure-Python play generator (`generate_plays` and its helpers) that training no longer calls — the tests, `bench_encode.py` and `compare_configs.py` still import it.
+- **The network** — `network.py`: `TDNetwork` (its architecture self-description and `from_state_dict`) and the equity computations.
+- **Self-play** — `game.py`: one game's simulation, for training (self-play) or evaluation (against an opponent network).
+- **Persistence and export** — `checkpoint.py`, the training checkpoint format and its only reader and writer; `export.py`, ONNX export and the embedded `bgrl.*` metadata contract.
+
+**`training/`** — `td_trainer.py`: the TD(λ) loop — ε-greedy self-play, evaluation against frozen level opponents, SPRT promotion, plateau detection, and checkpoint saves.
+
+**`utils/`** — `sprt.py`: the standalone SPRT behind promotion.
+
+**`configs/`** — complete, standalone training configurations, one per training target: DMP per variant (`dmp`, `nackgammon_dmp`, `bg960_dmp`), `money`, `gammon_seeking`, `gammon_avoiding`. `default.yaml` is `main.py`'s default `--config` and the file the tests load.
+
+**`parity/`** — the committed cross-language parity fixtures (see Architecture): `generate_vectors.py`, their deterministic generator; `model.onnx`, a tiny parity model, *not* a trained one; `vectors.json`, the golden board→features→output cases.
+
+**`tests/`** — the pytest suite is `test_core.py` (engine, training and checkpoint contracts; needs torch) and `test_parity.py` (PyTorch↔ONNX Runtime parity and the committed-fixture gate). Beside it, standalone scripts that are not collected: `run_tests.py`, a runner that needs neither pytest nor torch; `bench_encode.py`, `encode_board_batch` correctness and speedup; `verify_bg960.py`, the Bg960 starting-position constraint checker.
+
+**Scripts** — `main.py`, the training CLI; `export_onnx.py`, trainer checkpoint → ONNX; `profile_training.py`, the self-play vs. TD-update timing split; `compare_configs.py`, equity-weight config comparison (stale — see next steps).
+
+**Local, gitignored** — `native/` (the published BgMoveGen DLL; see Pitfalls), `output/` (training checkpoints and artifacts), `env/` (the venv; see Pitfalls).
 
 ## Architecture
 
@@ -231,7 +211,6 @@ python -m parity.generate_vectors        # regenerate committed parity fixtures
 - **Portfolio export shape.** One network per ONNX file today. When a second expert (race engine) exists, decide fused-graph vs. router + experts with routing consumer-side — an SSOT trade-off to weigh with evidence, not before.
 - **`main.py` docstring drift.** Docstring claims invocation via `python -m bgrle.main`, but no `bgrle` package exists; `<StartupFile>` confirms the actual entry is `python main.py`. Fix the docstring.
 - **Dead `TDNetwork.evaluate()` method.** `evaluate(features)` is defined on the network but unused — `select_play()` calls `network(batch)` directly under `torch.no_grad()`. Either remove the dead surface or document a use case.
-- **`dice.py` directory-tree annotation overstates.** The tree in this doc annotates `dice.py` as `generate_plays + helpers (tests only)`, but `compare_configs.py:22` imports both `generate_plays` and `_apply_move` from `engine.dice` — a profiling/comparison script alongside `profile_training.py`, not a test. One-line scope correction at next touch.
 - **`compare_configs.py` is stale against the successor-state architecture.** It imports `_apply_play` from `engine.game` — removed when play selection moved to successor states — so the module no longer imports at all; it also reaches for the underscore-private `_apply_move` in `engine.dice`, a visibility leak of the same vintage. Repairing it is a rewrite against the current API, not a bitrot fix, and the tool's purpose (which play do two equity-weight configs disagree on?) is still valid — so this is a repair-or-delete decision, not a defect. It is deliberately **left out of `<Compile>`** until that decision lands: listing a module that cannot be imported would be worse than the omission. If it is repaired, `_apply_move` is either promoted (drop the underscore, signaling intended cross-module use) or avoided.
 - **Public API block shows `REQUIRED_MOVEGEN_VERSION`'s literal value.** The listing renders `REQUIRED_MOVEGEN_VERSION: int = 100` — same drift class as the already-stripped `(currently 100)` Pitfall reference. An API listing should show the type but not the assigned default. One-line fix at next touch.
 - **Record the NativeAOT coupling in Pitfalls.** This engine consumes BgMoveGen via a published, **gitignored** DLL — invisible to csproj audits and to git history. Any BgMoveGen behavior change requires a DLL republish plus a pytest re-run; the `REQUIRED_MOVEGEN_VERSION` handshake guards the interop contract, not bugfixes within it. The umbrella's dependency-graph cross-edge note carries the same fact; Pitfalls is where a session touching this repo will actually see it.
