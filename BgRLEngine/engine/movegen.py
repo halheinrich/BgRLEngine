@@ -35,7 +35,7 @@ from engine.state import BoardState, NUM_POINTS
 # Bump this when BgRLEngine requires a new BgMoveGen capability.
 # BgMoveGen must report this exact version via get_version() or load_movegen()
 # will hard-fail with a clear message.
-REQUIRED_MOVEGEN_VERSION: int = 100
+REQUIRED_MOVEGEN_VERSION: int = 101
 
 # Default DLL location — relative to this file's package root.
 # Checked into BgRLEngine/native/BgMoveGen.dll so the repo is self-contained.
@@ -51,6 +51,19 @@ class Variant(IntEnum):
     BG960      = 2
 
 
+# ── Refusal statuses ────────────────────────────────────────────────────────
+
+class _Status(IntEnum):
+    """The negative codes a BgMoveGen export returns when it refuses a call.
+
+    Mirrors BgMoveGen's Interop.Status; the one Python spelling of it.
+    """
+    INVALID_ARGUMENT = -1   # null pointer, negative capacity, die outside 1–6,
+                            # unknown starting-position variant
+    INVALID_POSITION = -2   # the input board is not a well-formed position
+    FAILED           = -3   # anything else, caught inside BgMoveGen
+
+
 # ── Blittable struct matching BgMoveGen's BgBoardState (C layout) ───────────
 
 class _BgBoardState(ctypes.Structure):
@@ -63,11 +76,16 @@ class _BgBoardState(ctypes.Structure):
     ]
 
 
-MAX_SUCCESSORS = 100
+# Starting capacity of the successor buffer. Not a bound: a call whose
+# successors outnumber the buffer grows it (see generate_successor_states).
+_INITIAL_SUCCESSOR_CAPACITY = 100
 
-# Pre-allocated buffers — zero per-call heap allocation
+# Marshalling buffers, reused across calls. The successor buffer is
+# reallocated only when a call's successors outnumber its capacity, and the
+# larger buffer is kept, so it only ever grows. (The returned BoardStates are
+# allocated per call; only the ctypes buffers are reused.)
 _in_buf  = _BgBoardState()
-_out_buf = (_BgBoardState * MAX_SUCCESSORS)()
+_out_buf = (_BgBoardState * _INITIAL_SUCCESSOR_CAPACITY)()
 _pos_buf = _BgBoardState()
 
 _lib: ctypes.CDLL | None = None
@@ -159,6 +177,59 @@ def _from_ctypes(src: _BgBoardState) -> BoardState:
     return s
 
 
+# ── Successor-call helpers ───────────────────────────────────────────────────
+
+def _call_generate_successor_states(die1: int, die2: int) -> int:
+    """Call the export on _in_buf into _out_buf; return its successor count.
+
+    The count may exceed the buffer's capacity, in which case nothing was
+    written. A return below 1 raises (see generate_successor_states).
+    """
+    n = _lib.generate_successor_states(
+        ctypes.byref(_in_buf),
+        die1, die2,
+        _out_buf,
+        len(_out_buf),
+    )
+    if n < 1:
+        raise _successor_refusal(n, die1, die2)
+    return n
+
+
+def _grow_successor_buffer(capacity: int) -> None:
+    """Replace the successor buffer with one of the given capacity."""
+    global _out_buf
+    _out_buf = (_BgBoardState * capacity)()
+
+
+def _successor_refusal(rc: int, die1: int, die2: int) -> Exception:
+    """The exception for a generate_successor_states return below 1."""
+    if rc == 0:
+        return RuntimeError(
+            "BgMoveGen: generate_successor_states returned 0, which its "
+            "contract never does (a pass is one successor)"
+        )
+    try:
+        status = _Status(rc)
+    except ValueError:
+        return RuntimeError(
+            f"BgMoveGen: generate_successor_states returned {rc}, "
+            f"a status its contract does not define"
+        )
+    refused = f"BgMoveGen refused generate_successor_states: {status.name} ({rc})"
+    if status is _Status.INVALID_ARGUMENT:
+        return ValueError(
+            f"{refused}, an argument outside its domain (dice {die1}, {die2})"
+        )
+    if status is _Status.INVALID_POSITION:
+        return ValueError(
+            f"{refused}, the input board is not a well-formed position"
+        )
+    return RuntimeError(
+        f"{refused}, a failure inside BgMoveGen that no argument explains"
+    )
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def generate_successor_states(
@@ -166,28 +237,36 @@ def generate_successor_states(
     die1:  int,
     die2:  int,
 ) -> list[BoardState]:
-    """Return successor states, each from the perspective of the player now on roll.
+    """Return every successor state, each from the perspective of the player now on roll.
 
     Pass is returned as a single successor (flipped current state, no moves applied).
-    Always returns at least one state.
+    Always returns at least one state, and never a partial list: BgMoveGen
+    returns the full successor count, writing nothing when that count exceeds
+    the buffer's capacity, so this grows the buffer to the count and calls
+    again.
 
-    Raises RuntimeError if the output buffer overflows (should never happen;
-    MAX_SUCCESSORS = 100 is well above any legal backgammon position).
+    Raises:
+        ValueError:   BgMoveGen refused the call's input — a die outside 1–6
+                      (INVALID_ARGUMENT) or a board that is not a well-formed
+                      position (INVALID_POSITION).
+        RuntimeError: BgMoveGen failed internally (FAILED), or broke its
+                      contract (a return of 0, an undefined status, or a
+                      count that exceeds the grown buffer).
     """
     assert _lib is not None, "Call load_movegen() before use"
 
     _to_ctypes(state)
-    n = _lib.generate_successor_states(
-        ctypes.byref(_in_buf),
-        die1, die2,
-        _out_buf,
-        MAX_SUCCESSORS,
-    )
-    if n <= 0:
-        raise RuntimeError(
-            f"BgMoveGen: generate_successor_states returned {n} "
-            f"(expected >= 1; buffer capacity = {MAX_SUCCESSORS})"
-        )
+    n = _call_generate_successor_states(die1, die2)
+    if n > len(_out_buf):
+        _grow_successor_buffer(n)
+        grown = len(_out_buf)
+        n = _call_generate_successor_states(die1, die2)
+        if n > grown:
+            raise RuntimeError(
+                f"BgMoveGen: generate_successor_states returned {n} with a "
+                f"buffer grown to the {grown} it asked for; the count of one "
+                f"input must not change between calls"
+            )
     return [_from_ctypes(_out_buf[i]) for i in range(n)]
 
 
@@ -217,7 +296,7 @@ def get_starting_position(
         seed if seed is not None else -1,
         ctypes.byref(_pos_buf),
     )
-    if rc == -1:
+    if rc == _Status.INVALID_ARGUMENT:
         raise ValueError(f"BgMoveGen: unknown variant {variant}")
     if rc != 0:
         raise RuntimeError(f"BgMoveGen: get_starting_position returned {rc}")

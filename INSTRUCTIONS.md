@@ -100,7 +100,7 @@ def encode_board(state: BoardState) -> np.ndarray       # 303 features
 def encode_board_batch(states) -> np.ndarray            # vectorized
 
 # engine/movegen.py
-REQUIRED_MOVEGEN_VERSION: int = 100
+REQUIRED_MOVEGEN_VERSION: int                           # must equal BgMoveGen's get_version(); checked on load
 class Variant(IntEnum):
     STANDARD = 0
     NACKGAMMON = 1
@@ -212,5 +212,4 @@ python -m parity.generate_vectors        # regenerate committed parity fixtures
 - **`main.py` docstring drift.** Docstring claims invocation via `python -m bgrle.main`, but no `bgrle` package exists; `<StartupFile>` confirms the actual entry is `python main.py`. Fix the docstring.
 - **Dead `TDNetwork.evaluate()` method.** `evaluate(features)` is defined on the network but unused — `select_play()` calls `network(batch)` directly under `torch.no_grad()`. Either remove the dead surface or document a use case.
 - **`compare_configs.py` is stale against the successor-state architecture.** It imports `_apply_play` from `engine.game` — removed when play selection moved to successor states — so the module no longer imports at all; it also reaches for the underscore-private `_apply_move` in `engine.dice`, a visibility leak of the same vintage. Repairing it is a rewrite against the current API, not a bitrot fix, and the tool's purpose (which play do two equity-weight configs disagree on?) is still valid — so this is a repair-or-delete decision, not a defect. It is deliberately **left out of `<Compile>`** until that decision lands: listing a module that cannot be imported would be worse than the omission. If it is repaired, `_apply_move` is either promoted (drop the underscore, signaling intended cross-module use) or avoided.
-- **Public API block shows `REQUIRED_MOVEGEN_VERSION`'s literal value.** The listing renders `REQUIRED_MOVEGEN_VERSION: int = 100` — same drift class as the already-stripped `(currently 100)` Pitfall reference. An API listing should show the type but not the assigned default. One-line fix at next touch.
 - **Record the NativeAOT coupling in Pitfalls.** This engine consumes BgMoveGen via a published, **gitignored** DLL — invisible to csproj audits and to git history. Any BgMoveGen behavior change requires a DLL republish plus a pytest re-run; the `REQUIRED_MOVEGEN_VERSION` handshake guards the interop contract, not bugfixes within it. The umbrella's dependency-graph cross-edge note carries the same fact; Pitfalls is where a session touching this repo will actually see it.

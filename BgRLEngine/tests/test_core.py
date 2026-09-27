@@ -222,6 +222,47 @@ class TestMoveGeneration:
         assert has_bear_off
 
 
+def _spread_race() -> BoardState:
+    """BgMoveGen's pinned race (InteropTests.SpreadRace): one on-roll checker
+    on each point from 2 to 16, the opponent's fifteen in its home board —
+    three each on 19, 20 and 21, two each on 22, 23 and 24. Its 1-1 has 1,547
+    distinct plays, far more than the wrapper's starting buffer holds."""
+    state = BoardState()
+    for point in range(2, 17):
+        state.points[point - 1] = 1
+    for point, count in ((19, 3), (20, 3), (21, 3), (22, 2), (23, 2), (24, 2)):
+        state.points[point - 1] = -count
+    return state
+
+
+class TestSuccessorStates:
+    """generate_successor_states against BgMoveGen's interop contract."""
+
+    def test_every_successor_is_returned_past_the_starting_buffer(self):
+        from engine.movegen import generate_successor_states
+        successors = generate_successor_states(_spread_race(), 1, 1)
+        assert len(successors) == 1547
+        distinct = {
+            (tuple(s.points), s.bar_player, s.bar_opponent,
+             s.off_player, s.off_opponent)
+            for s in successors
+        }
+        assert len(distinct) == 1547
+
+    def test_a_malformed_board_raises_naming_invalid_position(self):
+        from engine.movegen import generate_successor_states
+        state = BoardState.standard_setup()
+        state.bar_player = 1  # a sixteenth on-roll checker
+        with pytest.raises(ValueError, match=r"INVALID_POSITION \(-2\)"):
+            generate_successor_states(state, 3, 1)
+
+    @pytest.mark.parametrize("die1, die2", [(0, 3), (7, 3), (3, 0), (3, 7)])
+    def test_a_die_outside_one_to_six_raises_naming_invalid_argument(self, die1, die2):
+        from engine.movegen import generate_successor_states
+        with pytest.raises(ValueError, match=r"INVALID_ARGUMENT \(-1\)"):
+            generate_successor_states(BoardState.standard_setup(), die1, die2)
+
+
 # ── Network tests ──────────────────────────────────────────────────
 
 class TestNetwork:
