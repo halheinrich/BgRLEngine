@@ -38,7 +38,8 @@ from engine.state import BoardState, NUM_POINTS
 REQUIRED_MOVEGEN_VERSION: int = 101
 
 # Default DLL location — relative to this file's package root.
-# Checked into BgRLEngine/native/BgMoveGen.dll so the repo is self-contained.
+# native/ is gitignored: publish BgMoveGen.dll there locally (see the
+# BgMoveGen DLL publish pitfall in INSTRUCTIONS.md).
 # Override via load_movegen(dll_path=...) or the movegen.dll_path config key.
 _DEFAULT_DLL_PATH = Path(__file__).parent.parent / "native" / "BgMoveGen.dll"
 
