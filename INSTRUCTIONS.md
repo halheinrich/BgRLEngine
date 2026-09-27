@@ -94,7 +94,7 @@ The observable surface consumed outside `td_trainer.py` is small:
 
 ```python
 # engine/state.py
-ENCODING_VERSION: int = 1                               # board→feature contract version; bump on any encoding change + regenerate parity fixtures
+ENCODING_VERSION: int                                   # board→feature contract version; bump on any encoding change + regenerate parity fixtures
 class BoardState: ...                                   # variant-agnostic position representation
 def encode_board(state: BoardState) -> np.ndarray       # 303 features
 def encode_board_batch(states) -> np.ndarray            # vectorized
