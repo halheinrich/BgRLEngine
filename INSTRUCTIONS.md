@@ -4,32 +4,61 @@
 > Umbrella status & dependency graph: [`../INSTRUCTIONS.md`](../INSTRUCTIONS.md)
 > Mission & principles: [`../VISION.md`](../VISION.md)
 
-## Stack
+## What it is for
 
-Python 3.11 / PyTorch 2.5.1+cu121 (CUDA) / ONNX opset 17 + ONNX Runtime / Visual Studio 2026 Python workload / Windows.
+BgRLEngine trains backgammon-playing neural networks from scratch by TD-Gammon-style self-play and exports them as ONNX models for the C# side of the tree. Its output is files, not a library: training checkpoints, the ONNX exports BgInference loads, and the committed parity fixtures that BgInference's and BgTournament's tests read in place. No other repository imports its Python. Phase 1 is the General engine for checker play; the routing tree under Architecture shows what else is planned.
 
-## Solution
+**Stack:** Python 3.11, PyTorch (the local venv has 2.5.1+cu121), ONNX and ONNX Runtime, on Windows; a .NET SDK to publish the BgMoveGen DLL. `BgRLEngine.slnx` wraps `BgRLEngine.pyproj` for the Visual Studio 2026 Python workload and nothing else: there is no `dotnet build` here.
 
-`D:\Users\Hal\Documents\Visual Studio 2026\Projects\backgammon\BgRLEngine\BgRLEngine.slnx`
+**Depends on:** BgMoveGen, for move generation and all variant starting positions, consumed at runtime as a native DLL via ctypes (`engine/movegen.py`). No managed interop, no project reference.
 
-The `.slnx` wraps the `BgRLEngine.pyproj` Python project for VS tooling; all real work happens in the Python tree.
+## Running it
 
-## Repo
+Everything runs from the package directory, `BgRLEngine/BgRLEngine/`: it is the import root.
 
-https://github.com/halheinrich/BgRLEngine — branch `main`.
+**Set up.** The venv is `env/` in the package directory:
 
-## Depends on
+```
+python -m venv env
+.\env\Scripts\Activate.ps1          # cmd: env\Scripts\activate.bat
+```
 
-- **BgMoveGen** — move generation and all variant starting positions, consumed at runtime as a native DLL via ctypes (`engine/movegen.py`). No managed interop, no project reference.
+The install lines are in `pyproject.toml`'s header, the canonical dependency record; the CUDA torch build needs its own index URL.
+
+The BgMoveGen DLL is gitignored, so publish it after cloning. From the BgMoveGen repo root, with `<repo>` the umbrella checkout:
+
+```
+dotnet publish BgMoveGen/BgMoveGen.csproj -c Release -r win-x64 -o "<repo>/BgRLEngine/BgRLEngine/native"
+```
+
+Publish the project, never the solution; [BgMoveGen's "Publishing the native DLL"](../BgMoveGen/INSTRUCTIONS.md#publishing-the-native-dll) owns that rule and its reasons. `load_movegen()` reads `native/BgMoveGen.dll` unless `dll_path` or the `movegen.dll_path` config key says otherwise, and refuses a DLL of any version but `REQUIRED_MOVEGEN_VERSION`.
+
+**Test.** No CI runs this suite; run it by hand, naming the interpreter:
+
+```
+./env/Scripts/python.exe -m pytest tests
+```
+
+`.gitignore`'s `env/` matches at any depth, so a stray venv elsewhere in the checkout does not show in `git status`, and one without onnx or onnxruntime fails at collection. `test_core.py` needs the DLL and errors without it. The parity gate needs only the committed fixtures and never skips. `test_checkpoint_round_trip` reads the gitignored `output/checkpoint_level4.pt` and skips loudly without it, so a fresh clone runs one test fewer than a machine with training output.
+
+**Train, export, regenerate.**
+
+```
+python main.py [--config configs/<name>.yaml] [--max-games N] [--output-dir DIR]
+python export_onnx.py CHECKPOINT [--output PATH] [--model-role ROLE]
+python -m parity.generate_vectors        # regenerate the committed parity fixtures
+```
+
+The standalone tools under Layout carry their usage in their headers.
 
 ## Layout
 
-One Python package, `BgRLEngine/`, wrapped for VS tooling by `BgRLEngine.slnx` → `BgRLEngine.pyproj`. The package directory is the import root: scripts and the suite run from it. `pyproject.toml` there is the canonical dependency record (no `requirements.txt` — see Pitfalls).
+One Python package, `BgRLEngine/`.
 
 **`engine/`** — the engine proper. Five areas:
 
 - **Position and encoding** — `state.py`: `BoardState`, the 303-feature encoding (`encode_board`, the vectorized `encode_board_batch`) and `ENCODING_VERSION`, the version every export and checkpoint is stamped with.
-- **Move generation** — `movegen.py`: the ctypes wrapper over the BgMoveGen native DLL (successor states, every variant's starting position) and its `REQUIRED_MOVEGEN_VERSION` check. `dice.py`: `roll_dice`, which self-play uses, beside the older pure-Python play generator (`generate_plays` and its helpers) that training no longer calls — the tests, `bench_encode.py` and `compare_configs.py` still import it.
+- **Move generation** — `movegen.py`: the ctypes wrapper over the BgMoveGen native DLL (successor states, every variant's starting position) and its `REQUIRED_MOVEGEN_VERSION` check; `halheinrich/backgammon#284` tracks the wrapper's untested defensive branches. `dice.py`: `roll_dice`, which self-play uses, beside the older pure-Python play generator (`generate_plays` and its helpers) that training no longer calls — the tests, `bench_encode.py` and `compare_configs.py` still import it.
 - **The network** — `network.py`: `TDNetwork` (its architecture self-description and `from_state_dict`) and the equity computations.
 - **Self-play** — `game.py`: one game's simulation, for training (self-play) or evaluation (against an opponent network).
 - **Persistence and export** — `checkpoint.py`, the training checkpoint format and its only reader and writer; `export.py`, ONNX export and the embedded `bgrl.*` metadata contract.
@@ -42,19 +71,21 @@ One Python package, `BgRLEngine/`, wrapped for VS tooling by `BgRLEngine.slnx` �
 
 **`parity/`** — the committed cross-language parity fixtures (see Architecture): `generate_vectors.py`, their deterministic generator; `model.onnx`, a tiny parity model, *not* a trained one; `vectors.json`, the golden board→features→output cases.
 
-**`tests/`** — the pytest suite is `test_core.py` (engine, training and checkpoint contracts; needs torch) and `test_parity.py` (PyTorch↔ONNX Runtime parity and the committed-fixture gate). Beside it, standalone scripts that are not collected: `run_tests.py`, a runner that needs neither pytest nor torch; `bench_encode.py`, `encode_board_batch` correctness and speedup; `verify_bg960.py`, the Bg960 starting-position constraint checker.
+**`tests/`** — the pytest suite is `test_core.py` (engine, training and checkpoint contracts; needs torch) and `test_parity.py` (PyTorch↔ONNX Runtime parity and the committed-fixture gate). Beside it, standalone scripts that are not collected: `run_tests.py`, a runner that needs neither pytest nor torch, though it loads the DLL; `bench_encode.py`, `encode_board_batch` correctness and speedup; `verify_bg960.py`, the Bg960 starting-position constraint checker.
 
-**Scripts** — `main.py`, the training CLI; `export_onnx.py`, trainer checkpoint → ONNX; `profile_training.py`, the self-play vs. TD-update timing split; `compare_configs.py`, equity-weight config comparison (stale — see next steps).
+**Scripts** — `main.py`, the training CLI; `export_onnx.py`, trainer checkpoint → ONNX; `profile_training.py`, the self-play vs. TD-update timing split; `compare_configs.py`, which play two equity-weight configs disagree on. That last one does not import: `engine.game._apply_play` is gone, so repairing it is a rewrite against the successor-state API, a repair-or-delete decision booked as `halheinrich/backgammon#168`. It stays out of `<Compile>` until that lands, since listing a module that cannot be imported would be worse than the omission; if repaired, the private `engine.dice._apply_move` it reaches for is promoted or avoided.
 
-**Local, gitignored** — `native/` (the published BgMoveGen DLL; see Pitfalls), `output/` (training checkpoints and artifacts), `env/` (the venv; see Pitfalls).
+**Local, gitignored** — `native/` (the published BgMoveGen DLL), `output/` (training checkpoints and artifacts), `env/` (the venv).
 
 ## Architecture
 
-**TD-Gammon-style neural network, self-play from scratch.** Compact feedforward network — 2 hidden layers × 256 units, ReLU hidden / Sigmoid output. Trained via TD(λ), λ ≈ 0.7, PyTorch on CUDA. ε-greedy move selection during training, greedy at inference. One network plays both sides; weights update after each game.
+**TD-Gammon-style neural network, self-play from scratch.** A compact feedforward network — 2 hidden layers × 256 units, ReLU hidden, sigmoid output — trained by TD(λ) in PyTorch. ε-greedy move selection during training, greedy at inference. One network plays both sides; weights update after each game.
 
-**Input encoding.** 303 features: 24 points × 6-unit thermometer+overflow, bar, borne off, pip ratio, race flag, checker counts. No variant flags — Standard, Nackgammon, and Bg960 share identical rules (hitting, bar re-entry, bearing off); only starting positions differ, so the position itself is sufficient input. `encode_board_batch` is vectorized for batch throughput.
+**Training runs on CPU at this network size.** Self-play and evaluation always do, and `Trainer` also moves backprop to CPU for any network under 1M parameters (`td_trainer.py`, `Trainer.__init__`), which covers the 2×256 network, so a GPU changes nothing until the network grows. The threshold rests on the judgment that kernel launch and transfer overhead dominate at this size (415b6a5, 2026-03-21); that commit records a throughput but no CPU/GPU comparison, and `profile_training.py` times CPU only.
 
-**Output vector.** 6 values: `[P(win), P(win gammon), P(win backgammon), P(lose), P(lose gammon), P(lose backgammon)]`. All sub-engines share this shape so the routing tree can compose them uniformly.
+**Input encoding.** 303 features, board only; `engine/state.py`'s module docstring gives the layout. No variant flags: Standard, Nackgammon and Bg960 share identical rules (hitting, bar re-entry, bearing off) and differ only in starting position, so the position itself is sufficient input, and that is what lets weights transfer across variants. The cube and match features (`encode_full`) exist for the cube engines; no network consumes them yet.
+
+**Output vector.** 6 values: `[P(win), P(win gammon), P(win backgammon), P(lose), P(lose gammon), P(lose backgammon)]`. All sub-engines share this shape so the routing tree can compose them uniformly. The six are exclusive outcomes, not cumulative ones: the training target is one-hot (`result_to_target`), so `P(win)` means a plain win. They are independent sigmoids, not a softmax, so nothing forces them to sum to 1.
 
 **Two-level routing tree.**
 
@@ -70,146 +101,44 @@ Position
                              Seeking / Averse / Indifferent / Balanced
 ```
 
-The diagram is the design target; most branches are not yet trained. Phase 1 scope is the General engine for checker play. The race/contact seam is a hard boundary — zero contact = race, else general engine. New seams (containment, back game, prime-vs-prime) can be added as additional router branches, each a specialist NN with the same 6-value output.
+The diagram is the design target; only the General engine exists. Phase 1 scope is the General engine for checker play. The race/contact seam is a hard boundary — zero contact = race, else general engine. New seams (containment, back game, prime-vs-prime) can be added as additional router branches, each a specialist NN with the same 6-value output.
 
-**Variants.** Standard, Nackgammon, Bg960. BgMoveGen is the sole source of truth for every starting position — the Python side never constructs its own. Bg960 positions are symmetric, mirror-free, ≥ 2 checkers per occupied point, ≥ 1 point per quadrant, minimum pip count 100, weighted toward 4–5 made points.
+**Gammon classification is rule-based** in that target: a MET lookup produces Seeking / Averse / Indifferent / Balanced, because the MET is solved mathematics and asking the NN to rediscover match-equity arithmetic wastes training capacity. Nothing implements the lookup yet; `compute_match_equity` takes the gammon values as arguments.
 
-**Training strategy.** Bg960 base model (diverse starts → general-purpose player) then fine-tune for Standard and Nackgammon (mid-game positions converge, so fine-tuning is cheap).
+**Variants.** Standard, Nackgammon, Bg960. BgMoveGen is the sole source of truth for every starting position — the Python side never constructs its own. BgDataTypes_Lib's `BoardPosition.Bg960` owns the Bg960 constraints; `tests/verify_bg960.py` checks them from this side.
 
-**SPRT promotion test.** Level N+1 = frozen checkpoint that beats Level N. Rolling evaluation win rate ≥ 0.70 triggers SPRT with H₀: p ≤ 0.70, H₁: p ≥ 0.76, α = 0.05, β = 0.10, hard cap 2000 games. Metric is game win rate, not point rate. α < β because false promotions corrupt the curriculum ladder; missed promotions just waste GPU and self-correct.
+**Training strategy, planned.** Train a Bg960 base model (diverse starts → general-purpose player), then fine-tune it for Standard and Nackgammon. Nothing does this yet: `Trainer` always starts from a fresh network, and no path loads a checkpoint into it. That fine-tuning will be cheap because mid-game positions converge is the design's assumption (45619ec, 2026-03-23), not a result.
 
-**Plateau detection.** Per-level self-play budget = 500K × 1.5^level. Evaluation every 5000 training games against the previous level (100-game match). Staleness signal: < 2pp improvement in rolling win rate across any 200K-game window → early termination. Three failed SPRTs within one level → halve remaining budget.
+**Promotion.** Levels are frozen checkpoints: Level N+1 is the network that beat Level N. Evaluation plays a short match against the current level's frozen opponent; when that match's win rate reaches the gate, the SPRT runs and decides promotion. `rolling_win_rate` in the code is that latest match's rate, not an average. Level 0→1 is the gate alone, with no SPRT, against an untrained network. The metric is game win rate, not point rate. `p0` and `p1` bracket a 75% target, 70% being "clearly not ready" and 76% "clearly ready" (45619ec, 2026-03-23). α < β because false promotions corrupt the curriculum ladder, while missed promotions just waste training games and self-correct. A test that reaches the hard cap rejects.
 
-**Gammon classification is rule-based.** MET lookup produces Seeking / Averse / Indifferent / Balanced — the MET is solved mathematics, so asking the NN to rediscover match-equity arithmetic wastes training capacity.
+**Plateau detection.** Each level has a self-play budget that grows geometrically with the level. A run ends when the budget runs out or training goes stale: stale means the latest evaluation's win rate improved by too little over the evaluation one staleness window of games earlier in the same level. Repeated failed SPRTs within a level halve what remains of its budget.
 
-**ONNX export & the cross-language contract.** Trained checkpoints become consumable outside Python (BgInference, C#) via `engine/export.py`. Graph contract: input `features` float32 `[batch, input_size]` (dynamic batch), output `probabilities` float32 `[batch, 6]`, opset 17. The metadata contract is embedded in the `.onnx` file's `metadata_props` (`bgrl.*` keys — no sidecar to drift; ONNX Runtime exposes it as `ModelMetadata.CustomMetadataMap`): `bgrl.encoding_version` is the fail-fast handshake (consumer holds its own required version, mirroring the `REQUIRED_MOVEGEN_VERSION` pattern), plus structural keys and checkpoint provenance (source file, sha256, games/level). **Exported trained models are deployment artifacts, never committed** — produce them locally with `export_onnx.py`. One network per ONNX file; the portfolio-of-experts export shape (fused graph vs. router + experts) is deliberately deferred until more than the General engine exists — `bgrl.model_role` keeps exports self-describing for that future.
+**The numbers live in the configs.** Evaluation cadence, match size, every SPRT parameter, the budget and the staleness window are the `evaluation`, `sprt` and `plateau` blocks of each `configs/*.yaml`. The fallback defaults in `Trainer` and `sprt_test` fill only a key a config omits, or a whole config when `main.py` finds no file at `--config`, and they are not kept in step: `cadence_games` already differs.
 
-**The checkpoint contract has one owner: `engine/checkpoint.py`.** The `.pt` file's shape is that module's and nobody else's — `save_checkpoint` writes it (the trainer's `_save_checkpoint` is a call into it) and `load_checkpoint` is the one path by which a checkpoint becomes a network; no caller builds or indexes the dict. Every save stamps two self-description keys beside the weights, optimizer state and stats — the same no-sidecar principle the `bgrl.*` ONNX metadata applies to exported models, one level up the pipeline: `CHECKPOINT_ARCHITECTURE_KEY` (`TDNetwork.architecture`, `{input_size, hidden_layers}`) and `CHECKPOINT_ENCODING_VERSION_KEY` (`ENCODING_VERSION` at save time). `load_checkpoint` enforces both. *Encoding handshake:* a checkpoint stamped with another encoding version refuses to load, the `ValueError` naming both versions — weights trained against one encoding evaluate silently wrong under another of the same input size, and nothing migrates on load. An unstamped checkpoint is read as encoding 1 with a `UserWarning`: encoding 1 is the only encoding that existed before the stamp, and every save now stamps, so the case dies out. *Architecture:* the embedded description is preferred and `TDNetwork.from_state_dict` **cross-checks it against the weight shapes** — disagreement means the file is corrupt or hand-edited, so it raises rather than trusting either side. A checkpoint written before the architecture key existed loads by inferring the architecture from the weight shapes; that fallback is permanent, not a migration window (`output/` is gitignored, so pre-contract checkpoints are exactly the ones that cannot be regenerated). Dropout is deliberately excluded from the self-description: it leaves no trace in the weights and is irrelevant for inference.
+**ONNX export & the cross-language contract.** Trained checkpoints become consumable outside Python via `engine/export.py`, whose module docstring owns the graph and metadata contract. The contract travels inside the `.onnx` file's `metadata_props` — no sidecar to drift; ONNX Runtime exposes it as `ModelMetadata.CustomMetadataMap`. One network per ONNX file; the portfolio-of-experts export shape (fused graph vs. router + experts) is deliberately deferred until more than the General engine exists, and `bgrl.model_role` keeps exports self-describing for that future.
 
-**Parity fixtures are the encoding's cross-language SSOT mitigation.** The 303-feature encoding must be reimplemented in C# and cannot be single-sourced, so `parity/` commits the executable contract: a tiny deterministic parity model (`model.onnx`, 303→16→16→6, seeded-NumPy weights, byte-identical on regeneration — not a trained model) plus `vectors.json`, 28 golden board→features→output triples sha256-paired to the model. The consumer gate reads its tolerances from the fixture (encoding pin bit-exact, inference pin abs 1e-5). Committed here rather than the umbrella's gitignored `TestData/` so a fresh checkout fails loud, never no-ops.
+What a reader outside Python needs:
 
-## Public API
+| Contract | Owner | Held by |
+| --- | --- | --- |
+| Board→feature encoding version | `ENCODING_VERSION`, `engine/state.py` | Stamped as `bgrl.encoding_version`; the consumer holds its own required version and fails fast, mirroring `REQUIRED_MOVEGEN_VERSION` |
+| Graph: input `features` float32 `[batch, input_size]` (dynamic batch), output `probabilities` float32 `[batch, 6]`, opset 17 | `INPUT_NAME`, `OUTPUT_NAME`, `ONNX_OPSET`, `engine/export.py` | `test_parity.py` |
+| Model metadata: `bgrl.*` structural keys, plus checkpoint provenance (source file, sha256, games, level) on checkpoint exports | `engine/export.py` | `test_parity.py`; BgInference's handshake |
+| Native interop version | `REQUIRED_MOVEGEN_VERSION`, `engine/movegen.py`, equal to BgMoveGen's `Interop.Version` | `load_movegen()` refuses any other version |
+| Checkpoint self-description | `CHECKPOINT_ARCHITECTURE_KEY`, `CHECKPOINT_ENCODING_VERSION_KEY`, `engine/checkpoint.py` | `load_checkpoint` |
+| Encoding and inference parity | `parity/model.onnx`, `parity/vectors.json` | `test_parity.py` here; BgInference's parity gate there |
 
-The observable surface consumed outside `td_trainer.py` is small:
+**The checkpoint contract has one owner: `engine/checkpoint.py`,** whose module docstring states it in full. The `.pt` file's shape is that module's alone: `save_checkpoint` writes it, `load_checkpoint` is the one path by which a checkpoint becomes a network, and no caller builds or indexes the dict. Every save stamps the architecture and the encoding version beside the weights, the same no-sidecar principle the `bgrl.*` metadata applies to exported models, one level up the pipeline (`halheinrich/backgammon#167`, `halheinrich/backgammon#169`). A checkpoint from another encoding version refuses to load, because weights trained against one encoding evaluate silently wrong under another of the same input size. One whose embedded architecture disagrees with its weight shapes refuses too, since the file is corrupt or hand-edited and neither side can be trusted. Two older shapes stay readable on purpose: an unstamped checkpoint is read as encoding 1 with a warning, and one without the architecture key infers it from the weight shapes, a permanent fallback because `output/` is gitignored and such files cannot be regenerated.
 
-```python
-# engine/state.py
-ENCODING_VERSION: int                                   # board→feature contract version; bump on any encoding change + regenerate parity fixtures
-class BoardState: ...                                   # variant-agnostic position representation
-def encode_board(state: BoardState) -> np.ndarray       # 303 features
-def encode_board_batch(states) -> np.ndarray            # vectorized
-
-# engine/movegen.py
-REQUIRED_MOVEGEN_VERSION: int                           # must equal BgMoveGen's get_version(); checked on load
-class Variant(IntEnum):
-    STANDARD = 0
-    NACKGAMMON = 1
-    BG960 = 2
-def load_movegen(dll_path: str | Path | None = None) -> None
-def generate_successor_states(state: BoardState,
-                              die1: int, die2: int) -> list[BoardState]
-def get_starting_position(variant: Variant | int = Variant.STANDARD,
-                          seed: int | None = None) -> BoardState
-
-# engine/network.py
-class TDNetwork(nn.Module):
-    input_size: int                                     # read-only property
-    hidden_layers: list[int]                            # read-only property (copy)
-    architecture: dict                                  # read-only property (copy);
-                                                        # {input_size, hidden_layers}
-    @classmethod
-    def from_state_dict(cls, state_dict,
-                        architecture: dict | None = None) -> TDNetwork
-                                                        # embedded architecture preferred and
-                                                        # verified; inferred from weight shapes
-                                                        # when absent
-    def forward(x: torch.Tensor) -> torch.Tensor        # (..., 6)
-    def evaluate(features: torch.Tensor) -> torch.Tensor
-def compute_equity(output: torch.Tensor,
-                   weights: torch.Tensor | None = None) -> torch.Tensor
-def compute_match_equity(output: torch.Tensor,
-                         gammon_value_win: float, gammon_value_lose: float,
-                         bg_value_win: float = 0.0,
-                         bg_value_lose: float = 0.0) -> torch.Tensor
-
-# engine/checkpoint.py
-CHECKPOINT_ARCHITECTURE_KEY: str                        # stamped keys; importable so contract
-CHECKPOINT_ENCODING_VERSION_KEY: str                    # tests can inspect a saved file by key
-@dataclass(frozen=True)
-class CheckpointStats:
-    games_played: int
-    current_level: int
-    levels_reached: int
-@dataclass(frozen=True)
-class LoadedCheckpoint:
-    network: TDNetwork
-    stats: CheckpointStats
-def save_checkpoint(path, network: TDNetwork,
-                    optimizer: torch.optim.Optimizer,
-                    stats: CheckpointStats) -> None     # stamps both keys
-def load_checkpoint(path) -> LoadedCheckpoint          # encoding handshake, then
-                                                        # from_state_dict with the embedded
-                                                        # architecture
-
-# engine/export.py
-ONNX_OPSET: int = 17
-INPUT_NAME:  str = "features"
-OUTPUT_NAME: str = "probabilities"
-def export_network(network: TDNetwork, output_path, *,
-                   model_role: str,
-                   provenance: dict[str, str] | None = None) -> dict[str, str]
-def export_checkpoint(checkpoint_path, output_path=None, *,
-                      model_role: str = "general") -> tuple[Path, dict[str, str]]
-
-# training/td_trainer.py
-class Trainer:
-    def train(self, max_games: int | None = None) -> TrainingStats
-def evaluate_against(network: TDNetwork, opponent: TDNetwork,
-                     device: torch.device, num_games: int,
-                     variant: Variant = Variant.STANDARD,
-                     rng: np.random.Generator | None = None,
-                     equity_weights: torch.Tensor | None = None) -> float
-
-# utils/sprt.py
-class SPRTResult:
-    CONTINUE = "continue"
-    ACCEPT = "accept"
-    REJECT = "reject"
-def sprt_test(wins: int, games: int,
-              p0: float = 0.70, p1: float = 0.76,
-              alpha: float = 0.05, beta: float = 0.10,
-              hard_cap: int = 2000) -> str
-```
-
-CLI entry points (run from `BgRLEngine/BgRLEngine/`):
-
-```
-python main.py [--config configs/<name>.yaml] [--max-games N] [--output-dir DIR]
-python export_onnx.py CHECKPOINT [--output PATH] [--model-role ROLE]
-python -m parity.generate_vectors        # regenerate committed parity fixtures
-```
+**Parity fixtures are the encoding's cross-language SSOT mitigation.** The 303-feature encoding must be reimplemented in C# and cannot be single-sourced, so `parity/` commits the executable contract: a tiny deterministic parity model (`model.onnx`, 303→16→16→6, seeded-NumPy weights, no timestamp — not a trained model) plus `vectors.json`, golden board→features→output triples sha256-paired to the model. Regeneration was byte-identical when 0a58949 checked it (2026-07-02); `vectors.json`'s `generator` block names the toolchain behind the committed pair. The consumer gate reads its tolerances from the fixture (encoding pin bit-exact, inference pin abs 1e-5). Committed here rather than the umbrella's gitignored `TestData/` so a fresh checkout fails loud, never no-ops.
 
 ## Pitfalls
 
-- **Two-network evaluation.** `play_game()` takes an optional `opponent` parameter. Without it, both sides use the same network (self-play for training). `evaluate_against()` and `_run_sprt()` **must** pass the opponent network — otherwise they silently test self-play and always report ~50%.
-- **BgMoveGen DLL publish.** `native/` is gitignored; after cloning, publish explicitly from the BgMoveGen project, not the solution: `dotnet publish BgMoveGen/BgMoveGen.csproj -c Release -r win-x64 -o "<repo>/BgRLEngine/BgRLEngine/native"`. Solution-level publish is managed-only and won't emit the unmanaged DLL.
-- **BgMoveGen version lock.** `REQUIRED_MOVEGEN_VERSION` in `engine/movegen.py` must match BgMoveGen's `get_version()` return value. Bump both sides together on any breaking interop change — the wrapper asserts on load.
+- **Two-network evaluation.** `play_game()` takes an optional `opponent` parameter. Without it, both sides use the same network (self-play for training). `evaluate_against()` and `_run_sprt()` **must** pass the opponent network — otherwise they silently test self-play and report ~50% whatever the network's strength.
+- **The BgMoveGen DLL can be stale at the right version.** It is published and gitignored, so it is invisible to csproj audits and to git history. After any BgMoveGen behaviour change, republish it (see Running it) and run pytest: `REQUIRED_MOVEGEN_VERSION` guards the interop contract, not a bug fixed within it. A breaking interop change bumps both sides together; [BgMoveGen's publishing section](../BgMoveGen/INSTRUCTIONS.md#publishing-the-native-dll) owns that rule.
 - **UTF-8 on Windows.** Every `open()` for config/data files must pass `encoding="utf-8"`. Default `cp1252` chokes on YAML comments containing non-ASCII. **Console output is the same trap:** a standalone script that prints a non-ASCII status marker dies on its own success message under the default `cp1252` stdout, after the work it was measuring already succeeded. `sys.stdout.reconfigure(encoding="utf-8")` at the top of such scripts.
 - **PyTorch CUDA memory query.** The attribute is `total_memory`, not `total_mem` — use `torch.cuda.get_device_properties(0).total_memory`.
-- **Python venv setup on Windows.** No `setup_env.bat` ships with the repo; create the venv manually with `python -m venv env`, then activate via `.\env\Scripts\Activate.ps1` (PowerShell) or `env\Scripts\activate.bat` (cmd). Windows PowerShell 5.1 rejects `&&` as a statement separator — chain with `;` or run as two commands. (PowerShell 7+ / pwsh supports `&&` and `||` like bash.)
-- **No variant flags in state encoding.** Tempting to add a one-hot "this is Nackgammon" feature when debugging variant-specific regressions; don't. Rules are identical across variants and the 303-feature encoding is load-bearing for cross-variant weight transfer.
+- **No variant flags in state encoding.** Tempting to add a one-hot "this is Nackgammon" feature when debugging variant-specific regressions; don't. Input encoding, under Architecture, says why.
 - **`.gitignore` excludes `*.txt` — never add a `requirements.txt`.** It would be silently invisible to version control. `pyproject.toml` is the canonical dependency record; if a new dep is installed, record it there.
-- **Encoding changes require a version bump + fixture regeneration.** Any change to the feature layout, sizes, or arithmetic in `engine/state.py` must bump `ENCODING_VERSION` and regenerate the parity fixtures (`python -m parity.generate_vectors`) in the same commit — `model.onnx` and `vectors.json` are sha256-paired and must always move together. The C# consumer's parity gate and version handshake depend on this discipline. A bump also invalidates every earlier training checkpoint for loading.
-- **A checkpoint from another encoding does not load.** `load_checkpoint` refuses a checkpoint stamped with any encoding version but the current one, and there is no migrate-on-load; an unstamped checkpoint is assumed encoding 1, with a warning.
-- **Never commit an exported trained model.** Only `parity/model.onnx` (tiny, deterministic, contract-stable) belongs in git; trained exports are deployment artifacts identified by their embedded `bgrl.checkpoint_sha256` and regenerated locally on demand.
-
-## Subproject-internal next steps
-
-- **Best-of-3 series promotion metric.** The single-game win-rate metric loses signal at higher curriculum levels — dice variance swamps the skill differential between consecutive levels. Design questions are settled; implementation pending.
-- **Config-specific promotion metrics.** Match win rate, equity error, gammon rate — the 75% per-game threshold is unreachable at higher levels and one metric does not fit all configs.
-- **Multi-core parallelization of self-play.** Currently single-process; training throughput is the bottleneck for higher-level runs.
-- **Portfolio export shape.** One network per ONNX file today. When a second expert (race engine) exists, decide fused-graph vs. router + experts with routing consumer-side — an SSOT trade-off to weigh with evidence, not before.
-- **`main.py` docstring drift.** Docstring claims invocation via `python -m bgrle.main`, but no `bgrle` package exists; `<StartupFile>` confirms the actual entry is `python main.py`. Fix the docstring.
-- **Dead `TDNetwork.evaluate()` method.** `evaluate(features)` is defined on the network but unused — `select_play()` calls `network(batch)` directly under `torch.no_grad()`. Either remove the dead surface or document a use case.
-- **`compare_configs.py` is stale against the successor-state architecture.** It imports `_apply_play` from `engine.game` — removed when play selection moved to successor states — so the module no longer imports at all; it also reaches for the underscore-private `_apply_move` in `engine.dice`, a visibility leak of the same vintage. Repairing it is a rewrite against the current API, not a bitrot fix, and the tool's purpose (which play do two equity-weight configs disagree on?) is still valid — so this is a repair-or-delete decision, not a defect. It is deliberately **left out of `<Compile>`** until that decision lands: listing a module that cannot be imported would be worse than the omission. If it is repaired, `_apply_move` is either promoted (drop the underscore, signaling intended cross-module use) or avoided.
-- **Record the NativeAOT coupling in Pitfalls.** This engine consumes BgMoveGen via a published, **gitignored** DLL — invisible to csproj audits and to git history. Any BgMoveGen behavior change requires a DLL republish plus a pytest re-run; the `REQUIRED_MOVEGEN_VERSION` handshake guards the interop contract, not bugfixes within it. The umbrella's dependency-graph cross-edge note carries the same fact; Pitfalls is where a session touching this repo will actually see it.
+- **Encoding changes require a version bump + fixture regeneration.** Any change to the feature layout, sizes, or arithmetic in `engine/state.py` must bump `ENCODING_VERSION` and regenerate the parity fixtures (`python -m parity.generate_vectors`) in the same commit — `model.onnx` and `vectors.json` are sha256-paired and must always move together. A bump also strands every earlier training checkpoint: `load_checkpoint` refuses it and nothing migrates.
+- **Never commit an exported trained model.** Only `parity/model.onnx` belongs in git; trained exports are deployment artifacts identified by their embedded `bgrl.checkpoint_sha256` and regenerated locally with `export_onnx.py`.
