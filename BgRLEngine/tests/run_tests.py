@@ -1,7 +1,7 @@
 """Standalone tests — runs without pytest or torch.
 
-Tests the pure-Python/numpy modules: state encoding, setup generator,
-SPRT logic, and dice/move generation.
+Tests the pure-Python/numpy modules: state encoding, SPRT logic, and
+dice/move generation. Starting positions come from the BgMoveGen DLL.
 
 Usage (from BgRLEngine\BgRLEngine\):
     python tests/run_tests.py

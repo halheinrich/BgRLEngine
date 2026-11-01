@@ -5,7 +5,7 @@ suitable for neural network input. The encoding is variant-agnostic:
 all variants (standard, Nackgammon, bg960) use the same rules and
 differ only in starting position.
 
-Input vector layout (~303 features):
+Input vector layout (303 features):
     Points (player):  24 points × 6 units = 144
     Points (opponent): 24 points × 6 units = 144
     Bar (player):      3 (thermometer: 1, 2, 3+)

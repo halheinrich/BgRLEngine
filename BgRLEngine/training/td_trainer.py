@@ -2,7 +2,7 @@
 
 Implements the core training algorithm:
 1. Play a game via self-play on CPU (fast for small networks)
-2. Move network to GPU, compute TD(λ) updates via backprop
+2. Move network to the training device, compute TD(λ) updates via backprop
 3. Move network back to CPU for next game
 
 The training loop also handles:
@@ -12,10 +12,12 @@ The training loop also handles:
 - Plateau detection and training termination
 
 Device strategy:
-- Self-play and evaluation run on CPU (avoids CUDA kernel launch overhead
-  which dominates for small networks with per-move forward passes)
-- TD(λ) backpropagation runs on GPU when available (benefits from
-  parallelism in the backward pass across the game's state sequence)
+- Self-play and evaluation run on CPU (avoids CUDA kernel launch overhead,
+  judged to dominate for small networks with per-move forward passes;
+  415b6a5 records no CPU/GPU comparison)
+- TD(λ) backpropagation runs on GPU only when one is available and the
+  network has at least 1M parameters; below that it stays on CPU too, which
+  covers the 2×256 network
 - Frozen opponent checkpoints always stay on CPU
 """
 from __future__ import annotations
@@ -213,13 +215,14 @@ class Trainer:
 
     Device strategy:
     - play_device (CPU): used for self-play and evaluation games
-    - train_device (GPU if available): used for TD(λ) backprop
+    - train_device (GPU if available and the network has at least 1M
+      parameters, otherwise CPU): used for TD(λ) backprop
     - Network moves between devices as needed
     - Frozen opponents always stay on play_device
 
     Args:
         config:     training configuration dictionary.
-        device:     torch device for training (GPU if available).
+        device:     requested torch device for training (see train_device).
         output_dir: directory for saving checkpoints and logs.
     """
 
@@ -251,7 +254,8 @@ class Trainer:
             lr=self.lr,
         )
 
-        # For small networks, CPU is faster than GPU due to transfer overhead.
+        # Small networks stay on CPU: transfer overhead is judged to outweigh
+        # the GPU (see the module docstring's device strategy).
         param_count = sum(p.numel() for p in self.network.parameters())
         if self.train_device.type == "cuda" and param_count < 1_000_000:
             print(f"Network has {param_count:,} parameters — using CPU for all computation")
@@ -306,7 +310,7 @@ class Trainer:
         self.network.to(self.play_device)
 
     def _to_train(self) -> None:
-        """Move network to GPU for backpropagation."""
+        """Move network to the training device for backpropagation."""
         self.network.to(self.train_device)
 
     def _current_epsilon(self) -> float:
@@ -428,7 +432,7 @@ class Trainer:
 
         Each iteration:
         1. Self-play one game on CPU
-        2. Move network to GPU, run TD(λ) backprop
+        2. Move network to the training device, run TD(λ) backprop
         3. Move network back to CPU
 
         Args:

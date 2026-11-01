@@ -17,7 +17,7 @@ Both are committed — a fresh checkout must fail the C# parity gate loudly
 if they are wrong, never no-op because they are absent.
 
 The parity model is NOT a trained model and is deliberately tiny
-(303 -> 16 -> 16 -> 6, ~25 KB): the gate proves encoding and inference
+(303 -> 16 -> 16 -> 6, ~22 KB): the gate proves encoding and inference
 parity, not playing strength, and a width-16 net exercises the identical
 op set (Gemm / Relu / Sigmoid), dynamic-batch graph contract, and
 metadata handshake as any production export. Its weights come from a

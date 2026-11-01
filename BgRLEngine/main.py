@@ -1,7 +1,7 @@
 """BgRLEngine — main entry point for training.
 
 Usage:
-    python -m bgrle.main [--config CONFIG_PATH] [--max-games N] [--output-dir DIR]
+    python main.py [--config CONFIG_PATH] [--max-games N] [--output-dir DIR]
 """
 from __future__ import annotations
 
