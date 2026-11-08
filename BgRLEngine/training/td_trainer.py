@@ -11,6 +11,15 @@ The training loop also handles:
 - SPRT-based level promotion
 - Plateau detection and training termination
 
+Truncated games (`GameResult.TRUNCATED`, stopped by `play_game`'s move cap)
+teach nothing and decide nothing; this module is that policy's one owner:
+- Training skips the TD(λ) update for a truncated game and counts it in
+  `TrainingStats.games_truncated`; `td_lambda_update` refuses one outright.
+- Evaluation and the SPRT count decisive games only, in the numerator and
+  the denominator, and count truncated ones apart. An evaluation with no
+  decisive game raises rather than report a win rate; the SPRT's hard cap
+  counts every game attempted, so repeated truncation still ends it.
+
 Device strategy:
 - Self-play and evaluation run on CPU (avoids CUDA kernel launch overhead,
   judged to dominate for small networks with per-move forward passes;
@@ -43,8 +52,18 @@ from utils.sprt import SPRTResult, sprt_test
 
 @dataclass
 class TrainingStats:
-    """Accumulated training statistics."""
+    """Accumulated training statistics.
+
+    `games_played` counts every self-play game, truncated ones included;
+    `games_truncated` is the part of it the move cap stopped, which taught
+    nothing. `eval_games_truncated` and `sprt_games_truncated` count the
+    evaluation and SPRT games the cap stopped, which decided nothing. None
+    of the three is saved in a checkpoint.
+    """
     games_played:          int   = 0
+    games_truncated:       int   = 0
+    eval_games_truncated:  int   = 0
+    sprt_games_truncated:  int   = 0
     total_moves:           int   = 0
     current_level:         int   = 0
     levels_reached:        int   = 0
@@ -59,17 +78,25 @@ class TrainingStats:
 
 
 def result_to_target(result: GameResult) -> np.ndarray:
-    """Convert a game result to the target output vector.
+    """Convert a decisive game result to the target output vector.
 
     Maps the final outcome to the 6 output probabilities.
     The targets are one-hot: exactly one outcome is 1.0.
 
     Args:
-        result: the game outcome.
+        result: the game outcome; must be decisive.
 
     Returns:
         Float32 array of length 6.
+
+    Raises:
+        ValueError: for `TRUNCATED` or `IN_PROGRESS`, which have no outcome
+            to target. What to do with such a game is the caller's policy.
     """
+    if not result.is_decisive:
+        raise ValueError(
+            f"{result.name} is not a decisive result and has no training target"
+        )
     target = np.zeros(NUM_OUTPUTS, dtype=np.float32)
     mapping = {
         GameResult.WIN:             0,
@@ -79,8 +106,7 @@ def result_to_target(result: GameResult) -> np.ndarray:
         GameResult.LOSE_GAMMON:     4,
         GameResult.LOSE_BACKGAMMON: 5,
     }
-    if result in mapping:
-        target[mapping[result]] = 1.0
+    target[mapping[result]] = 1.0
     return target
 
 
@@ -91,7 +117,7 @@ def td_lambda_update(
     td_lambda: float,
     device:    torch.device,
 ) -> float:
-    """Perform TD(λ) weight update from a completed game.
+    """Perform TD(λ) weight update from a decisive game.
 
     All states in the record are encoded from the initial player's
     perspective, and the result is also from the initial player's
@@ -102,13 +128,24 @@ def td_lambda_update(
     Args:
         network:   the network to update (should be on `device`).
         optimizer: the optimizer.
-        record:    completed game record.
+        record:    game record with a decisive result.
         td_lambda: the λ parameter (0 = TD(0), 1 = Monte Carlo).
         device:    torch device for training.
 
     Returns:
-        Loss value for monitoring.
+        Loss value for monitoring; 0.0, with no update, for a decisive
+        record of fewer than two states.
+
+    Raises:
+        ValueError: for a record whose result is not decisive (`TRUNCATED`
+            or `IN_PROGRESS`), whatever its length. A truncated game has no
+            terminal target; the caller skips it (see `Trainer.train`).
     """
+    if not record.result.is_decisive:
+        raise ValueError(
+            f"td_lambda_update needs a decisive record, got {record.result.name} "
+            f"after {record.num_moves} moves"
+        )
     if len(record.states) < 2:
         return 0.0
 
@@ -144,6 +181,33 @@ def td_lambda_update(
     return loss.item()
 
 
+@dataclass(frozen=True)
+class EvaluationResult:
+    """Outcome of an evaluation match, as `evaluate_against` returns it.
+
+    Built only by `evaluate_against`, which guarantees at least one
+    decisive game, so `win_rate` is always defined.
+
+    Attributes:
+        attempted: games played, truncated ones included.
+        decisive:  games that ended with a winner.
+        wins:      decisive games the evaluated network won.
+    """
+    attempted: int
+    decisive:  int
+    wins:      int
+
+    @property
+    def truncated(self) -> int:
+        """Games the move cap stopped; they count toward nothing."""
+        return self.attempted - self.decisive
+
+    @property
+    def win_rate(self) -> float:
+        """Wins over decisive games (0.0 to 1.0)."""
+        return self.wins / self.decisive
+
+
 def evaluate_against(
     network:        TDNetwork,
     opponent:       TDNetwork,
@@ -152,12 +216,13 @@ def evaluate_against(
     variant:        Variant                      = Variant.STANDARD,
     rng:            Optional[np.random.Generator] = None,
     equity_weights: Optional[torch.Tensor]        = None,
-) -> float:
+) -> EvaluationResult:
     """Evaluate a network against an opponent.
 
     Both networks should be on `device` (CPU for evaluation).
-    Plays num_games games, alternating who goes first, and returns
-    the win rate of the primary network.
+    Plays num_games games, alternating who goes first. The win rate is
+    over decisive games only: a truncated game is played and counted as
+    truncated, and otherwise ignored.
 
     Args:
         network:        the network to evaluate.
@@ -169,7 +234,13 @@ def evaluate_against(
         equity_weights: optional equity weights for move selection.
 
     Returns:
-        Win rate of `network` (0.0 to 1.0).
+        The match's attempted, decisive and won counts, and from them the
+        win rate of `network` over decisive games.
+
+    Raises:
+        RuntimeError: when no game of the `num_games` was decisive. No
+            decisive game is not a 0% win rate, and a match that cannot
+            finish a game is a defect, not a data point.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -177,7 +248,8 @@ def evaluate_against(
     network.eval()
     opponent.eval()
 
-    wins = 0
+    wins     = 0
+    decisive = 0
     for i in range(num_games):
         start = get_starting_position(variant)
 
@@ -190,8 +262,7 @@ def evaluate_against(
                 epsilon=0.0, rng=rng,
                 equity_weights=equity_weights,
             )
-            if record.result.value > 0:
-                wins += 1
+            network_won = record.result.is_win
         else:
             # opponent plays as initial player, network is second
             record = play_game(
@@ -201,10 +272,19 @@ def evaluate_against(
                 epsilon=0.0, rng=rng,
                 equity_weights=equity_weights,
             )
-            if record.result.value < 0:
-                wins += 1  # opponent lost = network wins
+            network_won = record.result.is_loss  # opponent lost = network wins
 
-    return wins / num_games
+        if record.result.is_decisive:
+            decisive += 1
+            if network_won:
+                wins += 1
+
+    if decisive == 0:
+        raise RuntimeError(
+            f"evaluation finished no game: {num_games} attempted, "
+            f"{num_games - decisive} truncated by the move cap"
+        )
+    return EvaluationResult(attempted=num_games, decisive=decisive, wins=wins)
 
 
 class Trainer:
@@ -377,19 +457,26 @@ class Trainer:
 
         Network must be on CPU before calling.
         Returns True if the test accepts (promote).
+
+        The statistical test sees decisive games only: its wins and games
+        are counted over them. Every game attempted, truncated or not,
+        alternates the starter and counts toward the hard cap, so a run of
+        truncations cannot keep the loop going; reaching the cap rejects.
+        Truncated games are added to `stats.sprt_games_truncated`.
         """
         if not self.level_opponents:
             return True
 
         opponent = self.level_opponents[-1]
         wins     = 0
-        games    = 0
+        decisive = 0
+        attempts = 0
 
         self.network.eval()
         while True:
             start = get_starting_position(self.variant)
 
-            if games % 2 == 0:
+            if attempts % 2 == 0:
                 record = play_game(
                     self.network, self.play_device,
                     starting_state=start,
@@ -397,8 +484,7 @@ class Trainer:
                     epsilon=0.0, rng=self.rng,
                     equity_weights=self.equity_weights,
                 )
-                if record.result.value > 0:
-                    wins += 1
+                network_won = record.result.is_win
             else:
                 record = play_game(
                     opponent, self.play_device,
@@ -407,17 +493,29 @@ class Trainer:
                     epsilon=0.0, rng=self.rng,
                     equity_weights=self.equity_weights,
                 )
-                if record.result.value < 0:
+                network_won = record.result.is_loss
+
+            attempts += 1
+            if record.result.is_decisive:
+                decisive += 1
+                if network_won:
                     wins += 1
+            else:
+                self.stats.sprt_games_truncated += 1
 
-            games += 1
-
-            result = sprt_test(
-                wins, games,
-                self.sprt_p0, self.sprt_p1,
-                self.sprt_alpha, self.sprt_beta,
-                self.sprt_hard_cap,
-            )
+            # sprt_test's own cap counts the games it is given, the decisive
+            # ones; the cap that bounds this loop counts attempts, which
+            # truncated games also consume. Like sprt_test's, it rejects
+            # before the likelihood ratio is read.
+            if attempts >= self.sprt_hard_cap:
+                result = SPRTResult.REJECT
+            else:
+                result = sprt_test(
+                    wins, decisive,
+                    self.sprt_p0, self.sprt_p1,
+                    self.sprt_alpha, self.sprt_beta,
+                    self.sprt_hard_cap,
+                )
             if result == SPRTResult.ACCEPT:
                 self.stats.sprt_tests_passed += 1
                 return True
@@ -432,7 +530,9 @@ class Trainer:
 
         Each iteration:
         1. Self-play one game on CPU
-        2. Move network to the training device, run TD(λ) backprop
+        2. Move network to the training device, run TD(λ) backprop; a
+           truncated game skips this step and is counted in
+           `stats.games_truncated` instead
         3. Move network back to CPU
 
         Args:
@@ -476,12 +576,16 @@ class Trainer:
                 equity_weights=self.equity_weights,
             )
 
-            # 2. TD(λ) update on train device
-            self._to_train()
-            loss = td_lambda_update(
-                self.network, self.optimizer, record,
-                self.td_lambda, self.train_device,
-            )
+            # 2. TD(λ) update on train device; a truncated game teaches
+            #    nothing and is only counted (the module docstring's policy).
+            if record.result is GameResult.TRUNCATED:
+                self.stats.games_truncated += 1
+            else:
+                self._to_train()
+                td_lambda_update(
+                    self.network, self.optimizer, record,
+                    self.td_lambda, self.train_device,
+                )
 
             self.stats.games_played         += 1
             self.stats.games_since_level_up += 1
@@ -498,6 +602,7 @@ class Trainer:
                 rate    = self.stats.games_played / elapsed
                 print(
                     f"Games: {self.stats.games_played:,} | "
+                    f"Truncated: {self.stats.games_truncated:,} | "
                     f"Level: {self.stats.current_level} | "
                     f"ε: {epsilon:.3f} | "
                     f"Win rate: {self.stats.rolling_win_rate:.3f} | "
@@ -510,7 +615,10 @@ class Trainer:
 
         elapsed = time.time() - self.stats.training_start_time
         print(f"\nTraining complete:")
-        print(f"  Games: {self.stats.games_played:,}")
+        print(f"  Games: {self.stats.games_played:,} "
+              f"({self.stats.games_truncated:,} truncated, not trained on)")
+        print(f"  Truncated evaluation games: {self.stats.eval_games_truncated:,}, "
+              f"SPRT games: {self.stats.sprt_games_truncated:,}")
         print(f"  Levels reached: {self.stats.levels_reached}")
         print(f"  Time: {elapsed / 3600:.1f} hours")
         print(f"  Rate: {self.stats.games_played / elapsed:.1f} games/s")
@@ -523,10 +631,17 @@ class Trainer:
     def _periodic_eval(self) -> None:
         """Run periodic evaluation and check for promotion.
 
-        Network must be on CPU before calling.
+        Network must be on CPU before calling. The win rate is over the
+        match's decisive games, and its truncated games are added to
+        `stats.eval_games_truncated`. A match with no decisive game raises
+        out of `evaluate_against` and is not caught here: a run that cannot
+        finish a game is a defect, and a fabricated 0.0 would read as a
+        collapse to plateau detection.
         """
         if not self.level_opponents:
-            win_rate = self._eval_vs_random()
+            match = self._eval_vs_random()
+            self.stats.eval_games_truncated += match.truncated
+            win_rate = match.win_rate
             self.stats.rolling_win_rate = win_rate
             self.stats.rolling_eval_history.append(win_rate)
             if win_rate > self.sprt_gate:
@@ -535,11 +650,13 @@ class Trainer:
             return
 
         opponent = self.level_opponents[-1]
-        win_rate = evaluate_against(
+        match    = evaluate_against(
             self.network, opponent, self.play_device,
             self.eval_match_size, self.variant, self.rng,
             equity_weights=self.equity_weights,
         )
+        self.stats.eval_games_truncated += match.truncated
+        win_rate = match.win_rate
         self.stats.rolling_win_rate = win_rate
         self.stats.rolling_eval_history.append(win_rate)
 
@@ -570,7 +687,7 @@ class Trainer:
         self._save_checkpoint(f"level{self.stats.current_level}")
         print(f"  Saved level {self.stats.current_level} checkpoint")
 
-    def _eval_vs_random(self) -> float:
+    def _eval_vs_random(self) -> EvaluationResult:
         """Evaluate network against random play (level 0 baseline).
 
         Network must be on CPU before calling.

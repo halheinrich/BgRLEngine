@@ -7,13 +7,18 @@ Move generation is delegated to BgMoveGen via generate_successor_states().
 Each successor is already from the perspective of the player now on roll.
 A pass (no legal moves) is returned as a single successor — the flipped
 current state — and is handled identically to a forced move.
+
+A game ends with a decisive result when a player bears off all 15
+checkers, or with `GameResult.TRUNCATED` when the `max_moves` cap stops
+it first: nobody won a truncated game, and what a trainer does with one is
+the trainer's policy, not this module's.
 """
 from __future__ import annotations
 
 import numpy as np
 import torch
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import Enum
 from typing import Optional
 
 from engine.state import BoardState, encode_board, encode_board_batch
@@ -22,8 +27,17 @@ from engine.movegen import generate_successor_states
 from engine.network import TDNetwork, compute_equity
 
 
-class GameResult(IntEnum):
-    """Outcome of a game from the initial player's perspective."""
+class GameResult(Enum):
+    """Outcome of a game from the initial player's perspective.
+
+    The six decisive members carry the signed points the initial player
+    scores. `IN_PROGRESS` (0) is a game not yet over; `TRUNCATED` (None) is
+    a game the move cap stopped, which has no outcome and so no points.
+
+    This is deliberately not an `IntEnum`: a result is classified through
+    `is_win`, `is_loss` and `is_decisive`, never by comparing its sign,
+    because a truncated game has no sign to compare.
+    """
     LOSE_BACKGAMMON = -3
     LOSE_GAMMON     = -2
     LOSE            = -1
@@ -31,14 +45,45 @@ class GameResult(IntEnum):
     WIN             =  1
     WIN_GAMMON      =  2
     WIN_BACKGAMMON  =  3
+    TRUNCATED       = None
+
+    @property
+    def is_win(self) -> bool:
+        """True for a decisive win of the initial player, of any size."""
+        return self in _WINS
+
+    @property
+    def is_loss(self) -> bool:
+        """True for a decisive loss of the initial player, of any size."""
+        return self in _LOSSES
+
+    @property
+    def is_decisive(self) -> bool:
+        """True when the game has a winner; False for IN_PROGRESS and TRUNCATED."""
+        return self.is_win or self.is_loss
+
+    @property
+    def opposite(self) -> GameResult:
+        """The same decisive outcome seen from the other player's side.
+
+        Raises:
+            ValueError: for a non-decisive result, which has no other side.
+        """
+        if not self.is_decisive:
+            raise ValueError(f"{self.name} is not decisive and has no opposite")
+        return GameResult(-self.value)
+
+
+_WINS   = frozenset({GameResult.WIN, GameResult.WIN_GAMMON, GameResult.WIN_BACKGAMMON})
+_LOSSES = frozenset({GameResult.LOSE, GameResult.LOSE_GAMMON, GameResult.LOSE_BACKGAMMON})
 
 
 @dataclass
 class GameRecord:
-    """Record of a completed game for training.
+    """Record of a finished game: decisive, or truncated by the move cap.
 
     Stores the sequence of board states (as feature vectors) and the
-    final outcome for TD(λ) updates.
+    final outcome for TD(λ) updates, which accept a decisive record only.
 
     All states are encoded from the initial player's perspective.
     The result is also from the initial player's perspective.
@@ -72,7 +117,7 @@ def _determine_result(state: BoardState, player_is_initial: bool) -> GameResult:
             result = GameResult.WIN
 
         if not player_is_initial:
-            result = GameResult(-result)
+            result = result.opposite
 
         return result
 
@@ -160,11 +205,17 @@ def play_game(
         opponent:       optional separate network for the second player.
         epsilon:        exploration rate for ε-greedy.
         rng:            random number generator.
-        max_moves:      safety limit on game length.
+        max_moves:      cap on the number of turns; a game still running
+                        after this many is stopped.
         equity_weights: optional equity weights for move selection.
 
     Returns:
-        GameRecord with state sequence and final result.
+        GameRecord with the state sequence and the result: a decisive
+        result when a player bears off, or `GameResult.TRUNCATED` when the
+        cap stops the game. A truncated record keeps the states recorded
+        before each turn (one per turn, no terminal state) and `num_moves`
+        equal to `max_moves`. A game that long is a defect signal; the
+        trainer counts them rather than learning from them.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -214,8 +265,8 @@ def play_game(
         state = new_state
         initial_player_turn = not initial_player_turn
 
-    # Safety limit reached
-    record.result = GameResult.WIN
+    # The cap stopped the game: nobody won it.
+    record.result = GameResult.TRUNCATED
     return record
 
 
@@ -261,7 +312,7 @@ def _determine_result_from_successor(
 
         # The player who just moved: initial player if initial_player_turn
         if not initial_player_turn:
-            result = GameResult(-result)
+            result = result.opposite
 
         return result
 

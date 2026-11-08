@@ -7,7 +7,7 @@ import time
 import torch
 import numpy as np
 from engine.network import TDNetwork
-from engine.game import play_game
+from engine.game import GameResult, play_game
 from engine.state import BoardState, BOARD_FEATURE_SIZE
 from engine.movegen import get_starting_position, load_movegen, Variant
 from training.td_trainer import td_lambda_update
@@ -28,6 +28,7 @@ play_game(net, dev, starting_state=get_starting_position(Variant.BG960), rng=rng
 n = 20
 play_time = 0.0
 update_time = 0.0
+truncated = 0
 
 for _ in range(n):
     start = get_starting_position(Variant.BG960)
@@ -37,11 +38,16 @@ for _ in range(n):
     record = play_game(net, dev, starting_state=start, epsilon=0.1, rng=rng)
     play_time += time.perf_counter() - t
 
+    # A truncated game is not trained on, as in Trainer.train.
+    if record.result is GameResult.TRUNCATED:
+        truncated += 1
+        continue
+
     t = time.perf_counter()
     td_lambda_update(net, opt, record, 0.7, dev)
     update_time += time.perf_counter() - t
 
-print(f"Over {n} games:")
+print(f"Over {n} games ({truncated} truncated: played, not updated):")
 print(f"  Self-play:  {play_time:.2f}s ({play_time/n:.3f}s/game)")
 print(f"  TD update:  {update_time:.2f}s ({update_time/n:.3f}s/game)")
 print(f"  Total:      {play_time + update_time:.2f}s ({(play_time+update_time)/n:.3f}s/game)")

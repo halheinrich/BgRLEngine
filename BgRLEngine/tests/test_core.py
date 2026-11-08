@@ -594,5 +594,237 @@ class TestResultTarget:
         assert sum(target) == 1.0
 
 
+# ── Truncated games (halheinrich/backgammon#534) ───────────────────
+
+class TestPlayGameCap:
+    def test_a_game_stopped_by_the_cap_is_truncated(self):
+        import torch
+        from engine.game import GameResult, play_game
+        record = play_game(
+            TDNetwork(), torch.device("cpu"),
+            rng=np.random.default_rng(0), max_moves=1,
+        )
+        assert record.result == GameResult.TRUNCATED
+        assert record.num_moves == 1
+        assert len(record.states) == 1
+
+
+def _record(result, states=0):
+    """A GameRecord with `states` arbitrary feature vectors."""
+    from engine.game import GameRecord
+    rng = np.random.default_rng(1)
+    return GameRecord(
+        states=[rng.random(BOARD_FEATURE_SIZE).astype(np.float32)
+                for _ in range(states)],
+        result=result,
+        num_moves=max(states, 1),
+    )
+
+
+class _ScriptedGames:
+    """Stand-in for play_game: returns the scripted results in order and
+    records, per call, whether the first network argument was `seat_net`."""
+
+    def __init__(self, results, seat_net=None):
+        self.results  = list(results)
+        self.seat_net = seat_net
+        self.calls    = 0
+        self.seated_first = []
+
+    def __call__(self, network, device, **kwargs):
+        self.seated_first.append(network is self.seat_net)
+        result = self.results[self.calls % len(self.results)]
+        self.calls += 1
+        return _record(result, states=2)
+
+
+class TestGameResultPredicates:
+    from engine.game import GameResult as _R
+    TABLE = {
+        _R.LOSE_BACKGAMMON: (False, True,  True),
+        _R.LOSE_GAMMON:     (False, True,  True),
+        _R.LOSE:            (False, True,  True),
+        _R.IN_PROGRESS:     (False, False, False),
+        _R.WIN:             (True,  False, True),
+        _R.WIN_GAMMON:      (True,  False, True),
+        _R.WIN_BACKGAMMON:  (True,  False, True),
+        _R.TRUNCATED:       (False, False, False),
+    }
+
+    def test_the_table_covers_every_member(self):
+        from engine.game import GameResult
+        assert set(self.TABLE) == set(GameResult)
+
+    @pytest.mark.parametrize("member", list(TABLE))
+    def test_every_member_is_classified(self, member):
+        assert (member.is_win, member.is_loss, member.is_decisive) == self.TABLE[member]
+
+    def test_named_cases(self):
+        from engine.game import GameResult
+        assert GameResult.WIN_GAMMON.is_win
+        assert GameResult.LOSE_BACKGAMMON.is_loss
+        assert not GameResult.TRUNCATED.is_win
+        assert not GameResult.TRUNCATED.is_loss
+
+    def test_truncated_is_distinct_from_in_progress(self):
+        from engine.game import GameResult
+        assert GameResult.TRUNCATED is not GameResult.IN_PROGRESS
+
+    def test_a_result_has_no_sign_to_compare(self):
+        from engine.game import GameResult
+        with pytest.raises(TypeError):
+            GameResult.WIN > 0
+
+    def test_opposite_swaps_the_side(self):
+        from engine.game import GameResult
+        assert GameResult.WIN_GAMMON.opposite is GameResult.LOSE_GAMMON
+        assert GameResult.LOSE_BACKGAMMON.opposite is GameResult.WIN_BACKGAMMON
+
+    @pytest.mark.parametrize("name", ["TRUNCATED", "IN_PROGRESS"])
+    def test_a_non_decisive_result_has_no_opposite(self, name):
+        from engine.game import GameResult
+        with pytest.raises(ValueError, match=name):
+            GameResult[name].opposite
+
+
+class TestTruncatedTeachesNothing:
+    @pytest.mark.parametrize("name", ["TRUNCATED", "IN_PROGRESS"])
+    def test_result_to_target_refuses_a_non_decisive_result(self, name):
+        from engine.game import GameResult
+        with pytest.raises(ValueError, match=name):
+            result_to_target(GameResult[name])
+
+    # One state is the one-move truncated game that the short-record
+    # return would otherwise let through.
+    @pytest.mark.parametrize("states", [1, 2])
+    def test_td_lambda_update_refuses_a_truncated_record(self, states):
+        import torch
+        from engine.game import GameResult
+        from training.td_trainer import td_lambda_update
+        net    = TDNetwork()
+        opt    = torch.optim.Adam(net.parameters(), lr=0.01)
+        before = {k: v.clone() for k, v in net.state_dict().items()}
+        with pytest.raises(ValueError, match="TRUNCATED"):
+            td_lambda_update(net, opt, _record(GameResult.TRUNCATED, states),
+                             0.7, torch.device("cpu"))
+        after = net.state_dict()
+        assert all(torch.equal(before[k], after[k]) for k in before)
+
+
+class TestEvaluationCountsDecisiveGamesOnly:
+    def _evaluate(self, monkeypatch, results, num_games):
+        import torch
+        import training.td_trainer as td
+        monkeypatch.setattr(td, "play_game", _ScriptedGames(results))
+        return td.evaluate_against(
+            TDNetwork(), TDNetwork(), torch.device("cpu"), num_games,
+            rng=np.random.default_rng(0),
+        )
+
+    def test_the_win_rate_is_over_decisive_games(self, monkeypatch):
+        from engine.game import GameResult as R
+        # Even games seat the evaluated network first, odd games the opponent.
+        results = [
+            R.TRUNCATED,
+            R.LOSE,         # opponent first and lost: a network win
+            R.TRUNCATED,
+            R.WIN,          # opponent first and won: a network loss
+            R.WIN,          # network first and won
+            R.TRUNCATED,
+            R.WIN_GAMMON,   # network first and won
+            R.TRUNCATED,
+        ]
+        match = self._evaluate(monkeypatch, results, len(results))
+        assert (match.attempted, match.decisive, match.wins) == (8, 4, 3)
+        assert match.truncated == 4
+        assert match.win_rate == 0.75
+
+    def test_no_decisive_game_raises_naming_the_counts(self, monkeypatch):
+        from engine.game import GameResult as R
+        with pytest.raises(RuntimeError, match="6 attempted, 6 truncated"):
+            self._evaluate(monkeypatch, [R.TRUNCATED], 6)
+
+    def test_periodic_eval_lets_the_failure_propagate(self, monkeypatch, tmp_path):
+        import torch
+        import training.td_trainer as td
+        from engine.game import GameResult as R
+        trainer = Trainer({"evaluation": {"eval_match_size": 4}},
+                          torch.device("cpu"), tmp_path)
+        monkeypatch.setattr(td, "play_game", _ScriptedGames([R.TRUNCATED]))
+        with pytest.raises(RuntimeError, match="4 attempted, 4 truncated"):
+            trainer._periodic_eval()
+        assert trainer.stats.rolling_eval_history == []
+
+
+class TestSprtCountsAttemptsAndDecisiveGames:
+    def _trainer(self, tmp_path, hard_cap=2000):
+        import torch
+        trainer = Trainer({"sprt": {"hard_cap": hard_cap}},
+                          torch.device("cpu"), tmp_path)
+        trainer.level_opponents.append(TDNetwork())
+        return trainer
+
+    def test_all_truncated_stops_at_the_attempt_cap_with_a_reject(
+        self, monkeypatch, tmp_path,
+    ):
+        import training.td_trainer as td
+        from engine.game import GameResult as R
+        trainer = self._trainer(tmp_path, hard_cap=10)
+        games   = _ScriptedGames([R.TRUNCATED])
+        monkeypatch.setattr(td, "play_game", games)
+        assert trainer._run_sprt() is False
+        assert games.calls == 10
+        assert trainer.stats.sprt_tests_failed == 1
+        assert trainer.stats.sprt_games_truncated == 10
+
+    def test_the_statistical_test_sees_decisive_counts_only(
+        self, monkeypatch, tmp_path,
+    ):
+        import training.td_trainer as td
+        from engine.game import GameResult as R
+        trainer = self._trainer(tmp_path)
+        # Network first wins; every opponent-first game is truncated.
+        games = _ScriptedGames([R.WIN, R.TRUNCATED], seat_net=trainer.network)
+        monkeypatch.setattr(td, "play_game", games)
+        seen = []
+        real_sprt_test = td.sprt_test
+
+        def spy(wins, played, *args):
+            seen.append((wins, played))
+            return real_sprt_test(wins, played, *args)
+
+        monkeypatch.setattr(td, "sprt_test", spy)
+        assert trainer._run_sprt() is True
+        decisive = (games.calls + 1) // 2
+        assert seen[-1] == (decisive, decisive)
+        assert seen == [((k + 2) // 2, (k + 2) // 2) for k in range(games.calls)]
+        assert trainer.stats.sprt_games_truncated == games.calls // 2
+        # The starter alternates by attempts, truncated ones included.
+        assert games.seated_first == [k % 2 == 0 for k in range(games.calls)]
+
+
+class TestTrainerSkipsTruncatedGames:
+    def test_a_truncated_game_is_counted_and_not_trained_on(
+        self, monkeypatch, tmp_path,
+    ):
+        import torch
+        import training.td_trainer as td
+        from engine.game import GameResult as R
+        trainer = Trainer({"seed": 0}, torch.device("cpu"), tmp_path)
+        monkeypatch.setattr(td, "play_game", _ScriptedGames([R.TRUNCATED, R.WIN]))
+        updated = []
+        real_update = td.td_lambda_update
+
+        def spy(network, optimizer, record, *args):
+            updated.append(record.result)
+            return real_update(network, optimizer, record, *args)
+
+        monkeypatch.setattr(td, "td_lambda_update", spy)
+        stats = trainer.train(max_games=2)
+        assert stats.games_played == 2
+        assert stats.games_truncated == 1
+        assert updated == [R.WIN]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
